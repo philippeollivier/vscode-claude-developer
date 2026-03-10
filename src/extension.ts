@@ -50,6 +50,13 @@ function readHookState(claudeFile: string, sessionMtime?: Date): HookState | und
     }
 }
 
+const statusColors: Record<string, string> = {
+    'status-active': '#3bb44a',
+    'status-permission': '#e5534b',
+    'status-idle': '#d4a72c',
+    'status-other': '#e09b13',
+};
+
 function statusLabel(state: HookState | undefined): { text: string; cssClass: string } {
     if (!state) { return { text: 'Active', cssClass: 'status-active' }; }
     switch (state.type) {
@@ -61,6 +68,43 @@ function statusLabel(state: HookState | undefined): { text: string; cssClass: st
 
 function escapeHtml(text: string): string {
     return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function hexToRgba(hex: string, alpha: number): string {
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return `rgba(${r},${g},${b},${alpha})`;
+}
+
+function renderToggleSetting(label: string, description: string, settingKey: string, checked: boolean): string {
+    return `<div class="setting-row">
+                    <div>
+                        <div class="setting-label">${escapeHtml(label)}</div>
+                        <div class="setting-desc">${escapeHtml(description)}</div>
+                    </div>
+                    <label class="toggle-switch">
+                        <input type="checkbox" ${checked ? 'checked' : ''} onchange="vscode.postMessage({command:'setting', key:'${settingKey}', value:this.checked})">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>`;
+}
+
+function renderSelectSetting(label: string, description: string, settingKey: string, value: string, options: {value: string, label: string}[]): string {
+    const optionsHtml = options.map(o =>
+        `<option value="${escapeHtml(o.value)}" ${value === o.value ? 'selected' : ''}>${escapeHtml(o.label)}</option>`
+    ).join('');
+    return `<div class="setting-row">
+                    <div>
+                        <div class="setting-label">${escapeHtml(label)}</div>
+                        <div class="setting-desc">${escapeHtml(description)}</div>
+                    </div>
+                    <div class="select-wrap">
+                        <select onchange="vscode.postMessage({command:'setting', key:'${settingKey}', value:this.value})">
+                            ${optionsHtml}
+                        </select>
+                    </div>
+                </div>`;
 }
 
 /** Lightweight markdown → HTML for tail lines (inline elements + headers/lists) */
@@ -80,11 +124,28 @@ function renderMarkdown(escaped: string): string {
         .replace(/^\d+\.\s+/, match => match);
 }
 
-function tailSessionMessages(logPath: string, maxLines: number = 12): string[] {
-    const content = fs.readFileSync(logPath, 'utf-8');
-    const jsonlLines = content.split('\n').filter(l => l.trim());
+function readTailChunk(logPath: string, chunkSize: number): string[] {
+    const fileSize = fs.statSync(logPath).size;
+    const readSize = Math.min(chunkSize, fileSize);
+    const readOffset = fileSize - readSize;
 
-    // Collect the last user message and last assistant message
+    const buf = Buffer.alloc(readSize);
+    const fd = fs.openSync(logPath, 'r');
+    try {
+        fs.readSync(fd, buf, 0, readSize, readOffset);
+    } finally {
+        fs.closeSync(fd);
+    }
+
+    let lines = buf.toString('utf-8').split('\n').filter(l => l.trim());
+    // Skip first line if partial (reading from middle of file)
+    if (readOffset > 0 && lines.length > 0) {
+        lines = lines.slice(1);
+    }
+    return lines;
+}
+
+function parseLastMessages(jsonlLines: string[]): { lastUser: string; lastAssistant: string } {
     let lastUser = '';
     let lastAssistant = '';
 
@@ -109,55 +170,71 @@ function tailSessionMessages(logPath: string, maxLines: number = 12): string[] {
             // skip
         }
     }
+    return { lastUser, lastAssistant };
+}
+
+function tailSessionMessages(logPath: string, maxLines: number = 12): string[] {
+    // Try 256KB tail first; fall back to full read if no messages found
+    let lines = readTailChunk(logPath, 262144);
+    let { lastUser, lastAssistant } = parseLastMessages(lines);
+
+    // If tail chunk missed the messages (e.g. huge tool-use entries), read full file
+    if (!lastUser && !lastAssistant) {
+        const fileSize = fs.statSync(logPath).size;
+        if (fileSize > 262144) {
+            const content = fs.readFileSync(logPath, 'utf-8');
+            lines = content.split('\n').filter(l => l.trim());
+            ({ lastUser, lastAssistant } = parseLastMessages(lines));
+        }
+    }
 
     const result: string[] = [];
-
-    // Show last user prompt (single line, prefixed)
     if (lastUser) {
         const firstLine = lastUser.split('\n')[0].substring(0, 120);
         result.push(`> ${firstLine}`);
     }
-
-    // Show last assistant response, preserving line breaks
     if (lastAssistant) {
-        const lines = lastAssistant.split('\n');
+        const asLines = lastAssistant.split('\n');
         const budget = maxLines - result.length;
-        // Take the last N lines so we see the most recent output
-        const tail = lines.slice(-budget);
-        result.push(...tail);
+        result.push(...asLines.slice(-budget));
     }
-
     return result;
 }
 
-function getOpenClaudeFiles(): SessionInfo[] {
+/** Iterate all open .claude tabs (deduplicated by fsPath), invoking callback with the URI and fsPath. */
+function forEachClaudeTab(callback: (uri: vscode.Uri, fsPath: string) => void): void {
     const seen = new Set<string>();
-    const results: SessionInfo[] = [];
-
     for (const group of vscode.window.tabGroups.all) {
         for (const tab of group.tabs) {
             if (tab.input instanceof vscode.TabInputText && isClaudeFile(tab.input.uri.fsPath)) {
                 const fsPath = tab.input.uri.fsPath;
                 if (seen.has(fsPath)) { continue; }
                 seen.add(fsPath);
-
-                const name = path.basename(fsPath, '.claude');
-                const dir = path.dirname(fsPath);
-                const sessionId = findExistingSession(dir, name);
-
-                let logPath: string | undefined;
-                let lastActive: Date | undefined;
-                if (sessionId) {
-                    const projectDir = dir.replace(/[/ ]/g, '-');
-                    logPath = path.join(os.homedir(), '.claude', 'projects', projectDir, `${sessionId}.jsonl`);
-                    try { lastActive = fs.statSync(logPath).mtime; } catch {}
-                }
-
-                const hookState = readHookState(name, lastActive);
-                results.push({ claudeFile: name, dir, sessionId, logPath, lastActive, hookState });
+                callback(tab.input.uri, fsPath);
             }
         }
     }
+}
+
+function getOpenClaudeFiles(): SessionInfo[] {
+    const results: SessionInfo[] = [];
+
+    forEachClaudeTab((_uri, fsPath) => {
+        const name = path.basename(fsPath, '.claude');
+        const dir = path.dirname(fsPath);
+        const sessionId = findExistingSession(dir, name);
+
+        let logPath: string | undefined;
+        let lastActive: Date | undefined;
+        if (sessionId) {
+            const projectDir = dir.replace(/[/ ]/g, '-');
+            logPath = path.join(os.homedir(), '.claude', 'projects', projectDir, `${sessionId}.jsonl`);
+            try { lastActive = fs.statSync(logPath).mtime; } catch {}
+        }
+
+        const hookState = readHookState(name, lastActive);
+        results.push({ claudeFile: name, dir, sessionId, logPath, lastActive, hookState });
+    });
 
     return results;
 }
@@ -245,15 +322,9 @@ function getDashboardHtml(sessions: SessionInfo[], summaries: Map<string, string
         .card-title h2 { margin: 0; font-size: 14px; font-weight: 600; }
         .card-meta { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
         .status { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-        .status-active { background: #3bb44a; }
-        .status-permission { background: #e5534b; }
-        .status-idle { background: #d4a72c; }
-        .status-other { background: #e09b13; }
+        ${Object.entries(statusColors).map(([cls, color]) => `.${cls} { background: ${color}; }`).join('\n        ')}
         .status-label { font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: 500; }
-        .status-label.status-active { background: rgba(59,180,74,0.15); color: #3bb44a; }
-        .status-label.status-permission { background: rgba(229,83,75,0.15); color: #e5534b; }
-        .status-label.status-idle { background: rgba(212,167,44,0.15); color: #d4a72c; }
-        .status-label.status-other { background: rgba(224,155,19,0.15); color: #e09b13; }
+        ${Object.entries(statusColors).map(([cls, color]) => `.status-label.${cls} { background: ${hexToRgba(color, 0.15)}; color: ${color}; }`).join('\n        ')}
         .card-btn { background: none; border: none; color: var(--vscode-descriptionForeground); cursor: pointer; font-size: 13px; padding: 2px 4px; border-radius: 4px; opacity: 0; transition: opacity 0.15s; }
         .card:hover .card-btn { opacity: 1; }
         .card-btn:hover { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); }
@@ -301,48 +372,13 @@ function getDashboardHtml(sessions: SessionInfo[], summaries: Map<string, string
         <div class="settings-body" id="settingsBody">
             <div class="settings-section">
                 <h3>Settings</h3>
-                <div class="setting-row">
-                    <div>
-                        <div class="setting-label">Auto-open terminal</div>
-                        <div class="setting-desc">Open a paired terminal when switching to a .claude tab</div>
-                    </div>
-                    <label class="toggle-switch">
-                        <input type="checkbox" ${settings.autoOpenTerminal ? 'checked' : ''} onchange="vscode.postMessage({command:'setting', key:'tabTerminal.autoOpenTerminal', value:this.checked})">
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-                <div class="setting-row">
-                    <div>
-                        <div class="setting-label">Auto-setup on start</div>
-                        <div class="setting-desc">Close non-.claude files and open all terminals on startup</div>
-                    </div>
-                    <label class="toggle-switch">
-                        <input type="checkbox" ${settings.autoSetupOnStart ? 'checked' : ''} onchange="vscode.postMessage({command:'setting', key:'tabTerminal.autoSetupOnStart', value:this.checked})">
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-                <div class="setting-row">
-                    <div>
-                        <div class="setting-label">Confirm close</div>
-                        <div class="setting-desc">Ask before closing a .claude file with a running terminal</div>
-                    </div>
-                    <label class="toggle-switch">
-                        <input type="checkbox" ${settings.confirmCloseClaudeFile ? 'checked' : ''} onchange="vscode.postMessage({command:'setting', key:'tabTerminal.confirmCloseClaudeFile', value:this.checked})">
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-                <div class="setting-row">
-                    <div>
-                        <div class="setting-label">Terminal location</div>
-                        <div class="setting-desc">Where to place paired terminals</div>
-                    </div>
-                    <div class="select-wrap">
-                        <select onchange="vscode.postMessage({command:'setting', key:'tabTerminal.terminalLocation', value:this.value})">
-                            <option value="right" ${settings.terminalLocation === 'right' ? 'selected' : ''}>Right</option>
-                            <option value="below" ${settings.terminalLocation === 'below' ? 'selected' : ''}>Below</option>
-                        </select>
-                    </div>
-                </div>
+                ${renderToggleSetting('Auto-open terminal', 'Open a paired terminal when switching to a .claude tab', 'tabTerminal.autoOpenTerminal', settings.autoOpenTerminal)}
+                ${renderToggleSetting('Auto-setup on start', 'Close non-.claude files and open all terminals on startup', 'tabTerminal.autoSetupOnStart', settings.autoSetupOnStart)}
+                ${renderToggleSetting('Confirm close', 'Ask before closing a .claude file with a running terminal', 'tabTerminal.confirmCloseClaudeFile', settings.confirmCloseClaudeFile)}
+                ${renderSelectSetting('Terminal location', 'Where to place paired terminals', 'tabTerminal.terminalLocation', settings.terminalLocation, [
+                    { value: 'right', label: 'Right' },
+                    { value: 'below', label: 'Below' },
+                ])}
             </div>
             <div class="settings-section">
                 <h3>Hotkeys</h3>
@@ -409,49 +445,39 @@ let goToNotificationIndex = 0;
 // Status bar item for agent attention alerts
 let statusBarItem: vscode.StatusBarItem | undefined;
 
-function getSessionMtime(claudeFile: string): Date | undefined {
-    // Find the .claude file among open tabs to get its directory, then look up session mtime
-    for (const group of vscode.window.tabGroups.all) {
-        for (const tab of group.tabs) {
-            if (tab.input instanceof vscode.TabInputText &&
-                tab.input.uri.fsPath.endsWith(`${claudeFile}.claude`)) {
-                const dir = path.dirname(tab.input.uri.fsPath);
-                const sessionId = findExistingSession(dir, claudeFile);
-                if (sessionId) {
-                    const projectDir = dir.replace(/[/ ]/g, '-');
-                    const logPath = path.join(os.homedir(), '.claude', 'projects', projectDir, `${sessionId}.jsonl`);
-                    try { return fs.statSync(logPath).mtime; } catch { return undefined; }
-                }
-            }
-        }
-    }
-    return undefined;
-}
-
 function getOpenClaudeFileNames(): Set<string> {
     const names = new Set<string>();
-    for (const group of vscode.window.tabGroups.all) {
-        for (const tab of group.tabs) {
-            if (tab.input instanceof vscode.TabInputText && isClaudeFile(tab.input.uri.fsPath)) {
-                names.add(path.basename(tab.input.uri.fsPath, '.claude'));
-            }
-        }
-    }
+    forEachClaudeTab((_uri, fsPath) => {
+        names.add(path.basename(fsPath, '.claude'));
+    });
     return names;
 }
 
 function getWaitingAgents(): { file: string; state: HookState }[] {
+    // Build a map of claudeFile name -> session mtime from open tabs (single pass)
+    const openSessions = new Map<string, Date | undefined>();
+    forEachClaudeTab((_uri, fsPath) => {
+        const name = path.basename(fsPath, '.claude');
+        const dir = path.dirname(fsPath);
+        const sessionId = findExistingSession(dir, name);
+        let mtime: Date | undefined;
+        if (sessionId) {
+            const projectDir = dir.replace(/[/ ]/g, '-');
+            const logPath = path.join(os.homedir(), '.claude', 'projects', projectDir, `${sessionId}.jsonl`);
+            try { mtime = fs.statSync(logPath).mtime; } catch {}
+        }
+        openSessions.set(name, mtime);
+    });
+
     const waiting: { file: string; state: HookState }[] = [];
-    const openNames = getOpenClaudeFileNames();
     try {
         if (!fs.existsSync(STATE_DIR)) { return waiting; }
         for (const file of fs.readdirSync(STATE_DIR)) {
             if (!file.endsWith('.json')) { continue; }
             const claudeFile = file.replace(/\.json$/, '');
             // Only count agents that have an open .claude tab
-            if (!openNames.has(claudeFile)) { continue; }
-            const mtime = getSessionMtime(claudeFile);
-            const state = readHookState(claudeFile, mtime);
+            if (!openSessions.has(claudeFile)) { continue; }
+            const state = readHookState(claudeFile, openSessions.get(claudeFile));
             if (state) { waiting.push({ file: claudeFile, state }); }
         }
     } catch {
@@ -745,14 +771,7 @@ export function activate(context: vscode.ExtensionContext) {
     // Listen for when a terminal is closed (cleanup our tracking)
     const terminalCloseListener = vscode.window.onDidCloseTerminal((terminal) => {
         if (managedTerminals.has(terminal)) {
-            managedTerminals.delete(terminal);
-            // Find and remove from the map
-            for (const [uri, t] of editorTerminalMap.entries()) {
-                if (t === terminal) {
-                    editorTerminalMap.delete(uri);
-                    break;
-                }
-            }
+            cleanupTerminal(terminal);
         }
     });
 
@@ -791,16 +810,19 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     // Open terminals for all open .claude tabs that don't already have one
-    function openTerminalsForAllClaudeFiles() {
+    async function openTerminalsForAllClaudeFiles() {
         for (const group of vscode.window.tabGroups.all) {
             for (const tab of group.tabs) {
                 if (tab.input instanceof vscode.TabInputText && isClaudeFile(tab.input.uri.fsPath)) {
                     const uri = tab.input.uri.toString();
                     if (!editorTerminalMap.has(uri)) {
-                        vscode.workspace.openTextDocument(tab.input.uri).then(doc => {
+                        try {
+                            const doc = await vscode.workspace.openTextDocument(tab.input.uri);
                             const editor = { document: doc } as vscode.TextEditor;
                             openTerminalForEditor(editor, context);
-                        });
+                        } catch (err) {
+                            console.error(`Failed to open terminal for ${tab.input.uri.fsPath}:`, err);
+                        }
                     }
                 }
             }
@@ -813,13 +835,15 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     // Auto-close non-claude files, then open terminals and dashboard
+    async function initializeWorkspace() {
+        await closeNonClaudeFiles();
+        await openTerminalsForAllClaudeFiles();
+        openDashboard();
+    }
+
     const autoSetup = vscode.workspace.getConfiguration('tabTerminal').get<boolean>('autoSetupOnStart', true);
     if (autoSetup) {
-        setTimeout(async () => {
-            await closeNonClaudeFiles();
-            openTerminalsForAllClaudeFiles();
-            openDashboard();
-        }, 500);
+        setTimeout(() => { initializeWorkspace(); }, 500);
     }
 
     // Start watching hook state directory globally (for status bar + dashboard refresh)
@@ -834,43 +858,28 @@ export function activate(context: vscode.ExtensionContext) {
     const goToNotificationCommand = vscode.commands.registerCommand(
         'tabTerminal.goToNotification',
         () => {
-            // Cycle through all agents with active hook state files
-            try {
-                if (!fs.existsSync(STATE_DIR)) { return; }
-                const waiting: { file: string; timestamp: number }[] = [];
-                for (const file of fs.readdirSync(STATE_DIR)) {
-                    if (!file.endsWith('.json')) { continue; }
-                    const claudeFile = file.replace(/\.json$/, '');
-                    const state = readHookState(claudeFile);
-                    if (state) {
-                        waiting.push({ file: claudeFile, timestamp: state.timestamp });
-                    }
-                }
-                if (waiting.length === 0) {
-                    vscode.window.showInformationMessage('No agents need attention');
-                    return;
-                }
-                // Sort by timestamp, most recent first
-                waiting.sort((a, b) => b.timestamp - a.timestamp);
-                // Wrap the index if it's out of bounds
-                if (goToNotificationIndex >= waiting.length) {
-                    goToNotificationIndex = 0;
-                }
-                const target = waiting[goToNotificationIndex];
-                goToNotificationIndex = (goToNotificationIndex + 1) % waiting.length;
-                for (const group of vscode.window.tabGroups.all) {
-                    for (const tab of group.tabs) {
-                        if (tab.input instanceof vscode.TabInputText &&
-                            tab.input.uri.fsPath.endsWith(`${target.file}.claude`)) {
-                            vscode.window.showTextDocument(tab.input.uri);
-                            return;
-                        }
-                    }
-                }
-                vscode.window.showInformationMessage(`No open tab for ${target.file}.claude`);
-            } catch {
-                // ignore
+            // Cycle through waiting agents (already filtered to open tabs with mtime checks)
+            const waiting = getWaitingAgents();
+            if (waiting.length === 0) {
+                vscode.window.showInformationMessage('No agents need attention');
+                return;
             }
+            // Sort by timestamp, most recent first
+            waiting.sort((a, b) => b.state.timestamp - a.state.timestamp);
+            // Wrap the index if it's out of bounds
+            if (goToNotificationIndex >= waiting.length) {
+                goToNotificationIndex = 0;
+            }
+            const target = waiting[goToNotificationIndex];
+            goToNotificationIndex = (goToNotificationIndex + 1) % waiting.length;
+            // Find and focus the matching open tab
+            let found = false;
+            forEachClaudeTab((uri, fsPath) => {
+                if (!found && path.basename(fsPath, '.claude') === target.file) {
+                    vscode.window.showTextDocument(uri);
+                    found = true;
+                }
+            });
         }
     );
 
@@ -995,12 +1004,25 @@ function openTerminalForEditor(editor: vscode.TextEditor, context: vscode.Extens
     }
 }
 
+/**
+ * Remove a terminal from both tracking collections (editorTerminalMap and managedTerminals).
+ * Does NOT dispose the terminal — callers that need disposal should call terminal.dispose() first.
+ */
+function cleanupTerminal(terminal: vscode.Terminal): void {
+    managedTerminals.delete(terminal);
+    for (const [uri, t] of editorTerminalMap.entries()) {
+        if (t === terminal) {
+            editorTerminalMap.delete(uri);
+            break;
+        }
+    }
+}
+
 function closeTerminalForEditor(uri: string): void {
     const terminal = editorTerminalMap.get(uri);
     if (terminal) {
         terminal.dispose();
-        editorTerminalMap.delete(uri);
-        managedTerminals.delete(terminal);
+        cleanupTerminal(terminal);
     }
 }
 
