@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { isClaudeFile } from './utils';
+import { getConfig } from './config';
 
 // ── Mutable shared state ─────────────────────────────────────────────────────
 
@@ -19,6 +20,20 @@ export function setIsSyncing(value: boolean): void {
     isSyncing = value;
 }
 
+/** Execute fn while holding the sync guard, releasing after a delay */
+export function withSyncGuard(fn: () => void | PromiseLike<unknown>, delay: number = 100): void {
+    isSyncing = true;
+    const result = fn();
+    if (result && typeof (result as PromiseLike<unknown>).then === 'function') {
+        (result as PromiseLike<unknown>).then(
+            () => setTimeout(() => { isSyncing = false; }, delay),
+            () => setTimeout(() => { isSyncing = false; }, delay),
+        );
+    } else {
+        setTimeout(() => { isSyncing = false; }, delay);
+    }
+}
+
 // ── Terminal management ──────────────────────────────────────────────────────
 
 export function openTerminalForEditor(editor: vscode.TextEditor, context: vscode.ExtensionContext): void {
@@ -33,8 +48,7 @@ export function openTerminalForEditor(editor: vscode.TextEditor, context: vscode
         }
     }
 
-    const config = vscode.workspace.getConfiguration('tabTerminal');
-    const location = config.get<string>('terminalLocation', 'right');
+    const location = getConfig().terminalLocation;
 
     // Get the directory of the current file
     const filePath = editor.document.uri.fsPath;

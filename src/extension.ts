@@ -2,14 +2,15 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { isClaudeFile } from './utils';
 import { forEachClaudeTab } from './tabs';
+import { getConfig, initConfig } from './config';
 import {
     editorTerminalMap,
     managedTerminals,
     isSyncing,
-    setIsSyncing,
     openTerminalForEditor,
     closeTerminalForEditor,
     cleanupTerminal,
+    withSyncGuard,
 } from './terminal';
 import {
     setStatusBarItem,
@@ -32,6 +33,7 @@ let goToNotificationIndex = 0;
 export function activate(context: vscode.ExtensionContext) {
     console.log('Claude Developer extension is now active');
     setExtensionContext(context);
+    initConfig(context);
 
     // Create status bar item (left side, high priority to be visible)
     const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
@@ -77,9 +79,8 @@ export function activate(context: vscode.ExtensionContext) {
     const toggleAutoCommand = vscode.commands.registerCommand(
         'tabTerminal.toggleAutoTerminal',
         async () => {
-            const config = vscode.workspace.getConfiguration('tabTerminal');
-            const current = config.get<boolean>('autoOpenTerminal', false);
-            await config.update('autoOpenTerminal', !current, vscode.ConfigurationTarget.Global);
+            const current = getConfig().autoOpenTerminal;
+            await vscode.workspace.getConfiguration('tabTerminal').update('autoOpenTerminal', !current, vscode.ConfigurationTarget.Global);
             vscode.window.showInformationMessage(
                 `Auto Terminal: ${!current ? 'Enabled' : 'Disabled'}`
             );
@@ -92,10 +93,7 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
 
-        const config = vscode.workspace.getConfiguration('tabTerminal');
-        const autoOpen = config.get<boolean>('autoOpenTerminal', false);
-
-        if (autoOpen) {
+        if (getConfig().autoOpenTerminal) {
             // Only auto-open/swap terminals for .claude files
             if (!isClaudeFile(editor.document.uri.fsPath)) {
                 return;
@@ -109,9 +107,7 @@ export function activate(context: vscode.ExtensionContext) {
                 // Focus the existing terminal for this editor
                 const terminal = editorTerminalMap.get(uri);
                 if (terminal) {
-                    setIsSyncing(true);
-                    terminal.show(true); // preserve focus on editor
-                    setTimeout(() => { setIsSyncing(false); }, 100);
+                    withSyncGuard(() => terminal.show(true));
                 }
             }
         }
@@ -135,9 +131,7 @@ export function activate(context: vscode.ExtensionContext) {
         if (pairedUri) {
             const docUri = vscode.Uri.parse(pairedUri);
             if (isClaudeFile(docUri.fsPath)) {
-                setIsSyncing(true);
-                await vscode.window.showTextDocument(docUri, { preserveFocus: true });
-                setTimeout(() => { setIsSyncing(false); }, 100);
+                withSyncGuard(() => vscode.window.showTextDocument(docUri, { preserveFocus: true }));
             }
         }
     });
@@ -150,7 +144,7 @@ export function activate(context: vscode.ExtensionContext) {
                 const filePath = tab.input.uri.fsPath;
 
                 if (isClaudeFile(filePath) && editorTerminalMap.has(uri)) {
-                    const confirmClose = vscode.workspace.getConfiguration('tabTerminal').get<boolean>('confirmCloseClaudeFile', true);
+                    const confirmClose = getConfig().confirmCloseClaudeFile;
                     if (confirmClose) {
                         const choice = await vscode.window.showWarningMessage(
                             'Closing this .claude file will also close its paired terminal. Continue?',
@@ -245,9 +239,11 @@ export function activate(context: vscode.ExtensionContext) {
         openDashboard();
     }
 
-    const autoSetup = vscode.workspace.getConfiguration('tabTerminal').get<boolean>('autoSetupOnStart', true);
+    const autoSetup = getConfig().autoSetupOnStart;
     if (autoSetup) {
-        setTimeout(() => { initializeWorkspace(); }, 500);
+        // onStartupFinished activation ensures workspace is ready; defer to next tick
+        // to let VS Code finish rendering before we close/open tabs
+        setTimeout(() => { initializeWorkspace(); }, 0);
     }
 
     // Start watching hook state directory globally (for status bar + dashboard refresh)

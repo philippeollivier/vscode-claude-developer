@@ -3,6 +3,7 @@ import * as path from 'path';
 import { SessionInfo, DashboardSettings } from './types';
 import { escapeHtml, renderMarkdown, hexToRgba, timeAgo } from './utils';
 import { getOpenClaudeFiles } from './tabs';
+import { getConfig } from './config';
 import { tailSessionMessages } from './session';
 import { statusLabel, statusColors, setDashboardCallbacks } from './state';
 import { closeTerminalForEditor } from './terminal';
@@ -248,15 +249,7 @@ export function refreshDashboard(): void {
         }
     }
 
-    const config = vscode.workspace.getConfiguration('tabTerminal');
-    const settings: DashboardSettings = {
-        autoOpenTerminal: config.get<boolean>('autoOpenTerminal', false),
-        terminalLocation: config.get<string>('terminalLocation', 'right'),
-        autoSetupOnStart: config.get<boolean>('autoSetupOnStart', true),
-        confirmCloseClaudeFile: config.get<boolean>('confirmCloseClaudeFile', true),
-    };
-
-    dashboardPanel.webview.html = getDashboardHtml(sessions, summaries, settings);
+    dashboardPanel.webview.html = getDashboardHtml(sessions, summaries, getConfig());
 }
 
 export function startDashboardAutoRefresh(): void {
