@@ -1,0 +1,99 @@
+{
+  "name": "claude-developer",
+  "displayName": "Claude Developer",
+  "description": "Pairs each editor tab with its own dedicated terminal in a split view",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "tabTerminal.openTerminalForTab",
+        "title": "Open Terminal for Current Tab",
+        "category": "Claude Developer"
+      },
+      {
+        "command": "tabTerminal.closeTerminalForTab",
+        "title": "Close Terminal for Current Tab",
+        "category": "Claude Developer"
+      },
+      {
+        "command": "tabTerminal.toggleAutoTerminal",
+        "title": "Toggle Auto Terminal",
+        "category": "Claude Developer"
+      },
+      {
+        "command": "tabTerminal.closeNonClaudeFiles",
+        "title": "Close All Non-Claude Files",
+        "category": "Claude Developer"
+      },
+      {
+        "command": "tabTerminal.openDashboard",
+        "title": "Open Dashboard",
+        "category": "Claude Developer"
+      },
+      {
+        "command": "tabTerminal.goToNotification",
+        "title": "Go to Latest Notification",
+        "category": "Claude Developer"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "tabTerminal.openDashboard",
+        "key": "cmd+d",
+        "mac": "cmd+d"
+      },
+      {
+        "command": "tabTerminal.goToNotification",
+        "key": "cmd+shift+d",
+        "mac": "cmd+shift+d"
+      }
+    ],
+    "configuration": {
+      "title": "Claude Developer",
+      "properties": {
+        "tabTerminal.autoOpenTerminal": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically open a terminal when a new file tab is opened"
+        },
+        "tabTerminal.terminalLocation": {
+          "type": "string",
+          "enum": ["right", "below"],
+          "default": "right",
+          "description": "Where to place the terminal relative to the editor"
+        },
+        "tabTerminal.autoSetupOnStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "On startup, close non-.claude files and open terminals for all .claude tabs"
+        },
+        "tabTerminal.confirmCloseClaudeFile": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show confirmation dialog when closing a .claude file with a paired terminal"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0"
+  }
+}
