@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { CONFIG_NAMESPACE } from './constants';
 
 export interface ExtensionConfig {
     autoOpenTerminal: boolean;
@@ -10,7 +11,7 @@ export interface ExtensionConfig {
 let cachedConfig: ExtensionConfig | undefined;
 
 function readConfig(): ExtensionConfig {
-    const cfg = vscode.workspace.getConfiguration('tabTerminal');
+    const cfg = vscode.workspace.getConfiguration(CONFIG_NAMESPACE);
     return {
         autoOpenTerminal: cfg.get<boolean>('autoOpenTerminal', false),
         terminalLocation: cfg.get<string>('terminalLocation', 'right'),
@@ -29,7 +30,7 @@ export function getConfig(): ExtensionConfig {
 export function initConfig(context: vscode.ExtensionContext): void {
     cachedConfig = readConfig();
     const listener = vscode.workspace.onDidChangeConfiguration((e) => {
-        if (e.affectsConfiguration('tabTerminal')) {
+        if (e.affectsConfiguration(CONFIG_NAMESPACE)) {
             cachedConfig = undefined;
         }
     });

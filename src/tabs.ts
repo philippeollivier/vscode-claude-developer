@@ -1,11 +1,23 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import * as os from 'os';
 import { SessionInfo } from './types';
-import { isClaudeFile } from './utils';
+import { isClaudeFile, getSessionLogPath } from './utils';
 import { readHookState } from './state';
 import { findExistingSession } from './terminal';
 import * as fs from 'fs';
+
+/** Find all open tabs whose document URI matches the given string. */
+export function findTabsByUri(targetUri: string): vscode.Tab[] {
+    const found: vscode.Tab[] = [];
+    for (const group of vscode.window.tabGroups.all) {
+        for (const tab of group.tabs) {
+            if (tab.input instanceof vscode.TabInputText && tab.input.uri.toString() === targetUri) {
+                found.push(tab);
+            }
+        }
+    }
+    return found;
+}
 
 /** Iterate all open .claude tabs (deduplicated by fsPath), invoking callback with the URI and fsPath. */
 export function forEachClaudeTab(callback: (uri: vscode.Uri, fsPath: string) => void): void {
@@ -22,25 +34,29 @@ export function forEachClaudeTab(callback: (uri: vscode.Uri, fsPath: string) => 
     }
 }
 
-export function getOpenClaudeFiles(): SessionInfo[] {
-    const results: SessionInfo[] = [];
+export async function getOpenClaudeFiles(): Promise<SessionInfo[]> {
+    const entries: { name: string; dir: string }[] = [];
 
     forEachClaudeTab((_uri, fsPath) => {
-        const name = path.basename(fsPath, '.claude');
-        const dir = path.dirname(fsPath);
-        const sessionId = findExistingSession(dir, name);
+        entries.push({
+            name: path.basename(fsPath, '.claude'),
+            dir: path.dirname(fsPath),
+        });
+    });
+
+    const results = await Promise.all(entries.map(async ({ name, dir }) => {
+        const sessionId = await findExistingSession(dir, name);
 
         let logPath: string | undefined;
         let lastActive: Date | undefined;
         if (sessionId) {
-            const projectDir = dir.replace(/[/ ]/g, '-');
-            logPath = path.join(os.homedir(), '.claude', 'projects', projectDir, `${sessionId}.jsonl`);
-            try { lastActive = fs.statSync(logPath).mtime; } catch {}
+            logPath = getSessionLogPath(dir, sessionId);
+            try { lastActive = (await fs.promises.stat(logPath)).mtime; } catch {}
         }
 
         const hookState = readHookState(name, lastActive);
-        results.push({ claudeFile: name, dir, sessionId, logPath, lastActive, hookState });
-    });
+        return { claudeFile: name, dir, sessionId, logPath, lastActive, hookState } as SessionInfo;
+    }));
 
     return results;
 }

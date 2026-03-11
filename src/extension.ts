@@ -1,8 +1,9 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { isClaudeFile } from './utils';
-import { forEachClaudeTab } from './tabs';
+import { forEachClaudeTab, findTabsByUri } from './tabs';
 import { getConfig, initConfig } from './config';
+import { CONFIG_NAMESPACE } from './constants';
 import {
     editorTerminalMap,
     managedTerminals,
@@ -55,10 +56,10 @@ export function activate(context: vscode.ExtensionContext) {
     // Command to manually open a terminal for the current tab
     const openTerminalCommand = vscode.commands.registerCommand(
         'tabTerminal.openTerminalForTab',
-        () => {
+        async () => {
             const editor = vscode.window.activeTextEditor;
             if (editor) {
-                openTerminalForEditor(editor, context);
+                await openTerminalForEditor(editor, context);
             } else {
                 vscode.window.showInformationMessage('No active editor to pair with terminal');
             }
@@ -80,16 +81,20 @@ export function activate(context: vscode.ExtensionContext) {
     const toggleAutoCommand = vscode.commands.registerCommand(
         'tabTerminal.toggleAutoTerminal',
         async () => {
-            const current = getConfig().autoOpenTerminal;
-            await vscode.workspace.getConfiguration('tabTerminal').update('autoOpenTerminal', !current, vscode.ConfigurationTarget.Global);
-            vscode.window.showInformationMessage(
-                `Auto Terminal: ${!current ? 'Enabled' : 'Disabled'}`
-            );
+            try {
+                const current = getConfig().autoOpenTerminal;
+                await vscode.workspace.getConfiguration(CONFIG_NAMESPACE).update('autoOpenTerminal', !current, vscode.ConfigurationTarget.Global);
+                vscode.window.showInformationMessage(
+                    `Auto Terminal: ${!current ? 'Enabled' : 'Disabled'}`
+                );
+            } catch (err) {
+                console.error('Claude Developer: failed to toggle auto-terminal:', err);
+            }
         }
     );
 
     // Listen for when a text editor becomes active
-    const editorChangeListener = vscode.window.onDidChangeActiveTextEditor((editor) => {
+    const editorChangeListener = vscode.window.onDidChangeActiveTextEditor(async (editor) => {
         if (!editor || isSyncing) {
             return;
         }
@@ -102,14 +107,12 @@ export function activate(context: vscode.ExtensionContext) {
 
             // Check if this editor already has a terminal
             const uri = editor.document.uri.toString();
-            if (!editorTerminalMap.has(uri)) {
-                openTerminalForEditor(editor, context);
-            } else {
+            const existingTerminal = editorTerminalMap.get(uri);
+            if (existingTerminal) {
                 // Focus the existing terminal for this editor
-                const terminal = editorTerminalMap.get(uri);
-                if (terminal) {
-                    withSyncGuard(() => terminal.show(true));
-                }
+                withSyncGuard(() => existingTerminal.show(true));
+            } else {
+                await openTerminalForEditor(editor, context);
             }
         }
     });
@@ -139,31 +142,37 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Listen for tab closes to dispose paired terminals
     const tabCloseListener = vscode.window.tabGroups.onDidChangeTabs(async (event) => {
-        for (const tab of event.closed) {
-            if (tab.input instanceof vscode.TabInputText) {
-                const uri = tab.input.uri.toString();
-                const filePath = tab.input.uri.fsPath;
+        try {
+            for (const tab of event.closed) {
+                if (!(tab.input instanceof vscode.TabInputText)) { continue; }
 
-                if (isClaudeFile(filePath) && editorTerminalMap.has(uri)) {
-                    const confirmClose = getConfig().confirmCloseClaudeFile;
-                    if (confirmClose) {
-                        const choice = await vscode.window.showWarningMessage(
-                            'Closing this .claude file will also close its paired terminal. Continue?',
-                            { modal: true },
-                            'Close'
-                        );
-                        if (choice === 'Close') {
-                            closeTerminalForEditor(uri);
-                        } else {
-                            await vscode.commands.executeCommand('vscode.open', tab.input.uri);
-                        }
-                    } else {
-                        closeTerminalForEditor(uri);
-                    }
-                } else {
+                const filePath = tab.input.uri.fsPath;
+                const uri = tab.input.uri.toString();
+
+                if (!isClaudeFile(filePath) || !editorTerminalMap.has(uri)) {
                     closeTerminalForEditor(uri);
+                    continue;
+                }
+
+                const confirmClose = getConfig().confirmCloseClaudeFile;
+                if (!confirmClose) {
+                    closeTerminalForEditor(uri);
+                    continue;
+                }
+
+                const choice = await vscode.window.showWarningMessage(
+                    'Closing this .claude file will also close its paired terminal. Continue?',
+                    { modal: true },
+                    'Close'
+                );
+                if (choice === 'Close') {
+                    closeTerminalForEditor(uri);
+                } else {
+                    await vscode.commands.executeCommand('vscode.open', tab.input.uri);
                 }
             }
+        } catch (err) {
+            console.error('Claude Developer: tab close handler error:', err);
         }
     });
 
@@ -218,7 +227,7 @@ export function activate(context: vscode.ExtensionContext) {
                         try {
                             const doc = await vscode.workspace.openTextDocument(tab.input.uri);
                             const editor = { document: doc } as vscode.TextEditor;
-                            openTerminalForEditor(editor, context);
+                            await openTerminalForEditor(editor, context);
                         } catch (err) {
                             console.error(`Failed to open terminal for ${tab.input.uri.fsPath}:`, err);
                         }
@@ -256,7 +265,10 @@ export function activate(context: vscode.ExtensionContext) {
     if (autoSetup) {
         // onStartupFinished activation ensures workspace is ready; defer to next tick
         // to let VS Code finish rendering before we close/open tabs
-        setTimeout(() => { initializeWorkspace(); }, 0);
+        setTimeout(async () => {
+            try { await initializeWorkspace(); }
+            catch (err) { console.error('Claude Developer: initialization failed:', err); }
+        }, 0);
     }
 
     // Start watching hook state directory globally (for status bar + dashboard refresh)
@@ -270,9 +282,9 @@ export function activate(context: vscode.ExtensionContext) {
 
     const goToNotificationCommand = vscode.commands.registerCommand(
         'tabTerminal.goToNotification',
-        () => {
+        async () => {
             // Cycle through waiting agents (already filtered to open tabs with mtime checks)
-            const waiting = getWaitingAgents();
+            const waiting = await getWaitingAgents();
             if (waiting.length === 0) {
                 vscode.window.showInformationMessage('No agents need attention');
                 return;

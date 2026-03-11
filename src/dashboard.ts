@@ -2,12 +2,13 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { SessionInfo, SubagentInfo, DashboardSettings } from './types';
-import { escapeHtml, renderMarkdown, hexToRgba, timeAgo, getForkBase } from './utils';
-import { getOpenClaudeFiles } from './tabs';
+import { escapeHtml, renderMarkdown, hexToRgba, timeAgo, getForkBase, escapePathForJs, isForkName } from './utils';
+import { getOpenClaudeFiles, findTabsByUri } from './tabs';
 import { getConfig } from './config';
 import { tailSessionMessages, parseSubagents } from './session';
 import { statusLabel, statusColors, setDashboardCallbacks } from './state';
 import { closeTerminalForEditor, forkSession } from './terminal';
+import { DASHBOARD_REFRESH_INTERVAL_MS, CONFIG_NAMESPACE } from './constants';
 
 // ── Mutable shared state ─────────────────────────────────────────────────────
 
@@ -16,6 +17,28 @@ export let extensionContext: vscode.ExtensionContext | undefined;
 
 let dashboardInterval: ReturnType<typeof setInterval> | undefined;
 let canPostMessage = false;
+let panelDisposables: vscode.Disposable[] = [];
+
+// ── Security helpers ────────────────────────────────────────────────────────
+
+function isPathSafe(p: string): boolean {
+    const normalized = path.normalize(p);
+    // Reject path traversal
+    if (normalized !== p && normalized !== p.replace(/\/$/, '')) { return false; }
+    // Must be absolute
+    if (!path.isAbsolute(normalized)) { return false; }
+    return true;
+}
+
+// ── Tab-closing helper ──────────────────────────────────────────────────────
+
+async function closeTabByPath(filePath: string): Promise<void> {
+    const uri = vscode.Uri.file(filePath).toString();
+    closeTerminalForEditor(uri);
+    for (const tab of findTabsByUri(uri)) {
+        await vscode.window.tabGroups.close(tab);
+    }
+}
 
 export function setExtensionContext(ctx: vscode.ExtensionContext): void {
     extensionContext = ctx;
@@ -60,8 +83,8 @@ export function renderCard(s: SessionInfo, summaries: Map<string, string>, subag
     const agents = subagents.get(s.claudeFile) ?? [];
     const { text: statusText, cssClass } = statusLabel(s.hookState);
     const filePath = path.join(s.dir, `${s.claudeFile}.claude`);
-    const escapedPath = escapeHtml(filePath.replace(/\\/g, '\\\\').replace(/'/g, "\\'"));
-    const isFork = s.claudeFile.includes('~');
+    const escapedPath = escapePathForJs(filePath);
+    const isFork = isForkName(s.claudeFile);
     const tailHtml = tailLines
         ? tailLines.split('\n').map(l => {
             const isUser = l.startsWith('&gt;');
@@ -135,8 +158,8 @@ function sortWithForks(items: SessionInfo[]): SessionInfo[] {
     const sorted: SessionInfo[] = [];
     for (const group of byBase.values()) {
         group.sort((a, b) => {
-            const aHasFork = a.claudeFile.includes('~');
-            const bHasFork = b.claudeFile.includes('~');
+            const aHasFork = isForkName(a.claudeFile);
+            const bHasFork = isForkName(b.claudeFile);
             if (!aHasFork && bHasFork) { return -1; }
             if (aHasFork && !bHasFork) { return 1; }
             return a.claudeFile.localeCompare(b.claudeFile);
@@ -161,14 +184,14 @@ export function getCardsHtml(sessions: SessionInfo[], summaries: Map<string, str
         const color = groupColors[colorIndex % groupColors.length];
         colorIndex++;
         const sorted = sortWithForks(items);
-        const escapedDir = escapeHtml(dir.replace(/\\/g, '\\\\').replace(/'/g, "\\'"));
+        const escapedDir = escapePathForJs(dir);
         body += `<div class="group">
             <div class="group-header-row">
                 <h2 class="group-header" style="color: ${color}; border-bottom-color: ${color};">${escapeHtml(dirName)}</h2>
                 <button class="add-btn" style="color: ${color};" onclick="event.stopPropagation(); vscode.postMessage({command:'create', dir:'${escapedDir}'})" title="New .claude file">+</button>
             </div>
             ${sorted.map(c => {
-                const isFork = c.claudeFile.includes('~');
+                const isFork = isForkName(c.claudeFile);
                 return isFork
                     ? `<div class="fork-child">${renderCard(c, summaries, subagents, color)}</div>`
                     : renderCard(c, summaries, subagents, color);
@@ -185,6 +208,7 @@ export function getDashboardHtml(sessions: SessionInfo[], summaries: Map<string,
     return `<!DOCTYPE html>
 <html>
 <head>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
     <style>
         body { font-family: var(--vscode-font-family); padding: 24px; color: var(--vscode-foreground); background: var(--vscode-panel-background); margin: 0; }
         .group { margin-bottom: 28px; }
@@ -260,10 +284,10 @@ export function getDashboardHtml(sessions: SessionInfo[], summaries: Map<string,
         <div class="settings-body" id="settingsBody">
             <div class="settings-section">
                 <h3>Settings</h3>
-                ${renderToggleSetting('Auto-open terminal', 'Open a paired terminal when switching to a .claude tab', 'tabTerminal.autoOpenTerminal', settings.autoOpenTerminal)}
-                ${renderToggleSetting('Auto-setup on start', 'Close non-.claude files and open all terminals on startup', 'tabTerminal.autoSetupOnStart', settings.autoSetupOnStart)}
-                ${renderToggleSetting('Confirm close', 'Ask before closing a .claude file with a running terminal', 'tabTerminal.confirmCloseClaudeFile', settings.confirmCloseClaudeFile)}
-                ${renderSelectSetting('Terminal location', 'Where to place paired terminals', 'tabTerminal.terminalLocation', settings.terminalLocation, [
+                ${renderToggleSetting('Auto-open terminal', 'Open a paired terminal when switching to a .claude tab', `${CONFIG_NAMESPACE}.autoOpenTerminal`, settings.autoOpenTerminal)}
+                ${renderToggleSetting('Auto-setup on start', 'Close non-.claude files and open all terminals on startup', `${CONFIG_NAMESPACE}.autoSetupOnStart`, settings.autoSetupOnStart)}
+                ${renderToggleSetting('Confirm close', 'Ask before closing a .claude file with a running terminal', `${CONFIG_NAMESPACE}.confirmCloseClaudeFile`, settings.confirmCloseClaudeFile)}
+                ${renderSelectSetting('Terminal location', 'Where to place paired terminals', `${CONFIG_NAMESPACE}.terminalLocation`, settings.terminalLocation, [
                     { value: 'right', label: 'Right' },
                     { value: 'below', label: 'Below' },
                 ])}
@@ -344,19 +368,19 @@ export function getDashboardHtml(sessions: SessionInfo[], summaries: Map<string,
 
 // ── Dashboard lifecycle ──────────────────────────────────────────────────────
 
-export function refreshDashboard(): void {
+export async function refreshDashboard(): Promise<void> {
     if (!dashboardPanel) { return; }
 
-    const sessions = getOpenClaudeFiles();
+    const sessions = await getOpenClaudeFiles();
     const summaries = new Map<string, string>();
     const subagentMap = new Map<string, SubagentInfo[]>();
 
     for (const s of sessions) {
         if (!s.logPath) { continue; }
         try {
-            const lines = tailSessionMessages(s.logPath, 12);
+            const lines = await tailSessionMessages(s.logPath, 12);
             summaries.set(s.claudeFile, lines.map(l => escapeHtml(l)).join('\n'));
-            const agents = parseSubagents(s.logPath);
+            const agents = await parseSubagents(s.logPath);
             if (agents.length > 0) {
                 subagentMap.set(s.claudeFile, agents);
             }
@@ -381,10 +405,10 @@ export function refreshDashboard(): void {
 export function startDashboardAutoRefresh(): void {
     stopDashboardAutoRefresh();
 
-    // Interval refresh every 10s
+    // Interval refresh
     dashboardInterval = setInterval(() => {
         if (dashboardPanel?.visible) { refreshDashboard(); }
-    }, 10000);
+    }, DASHBOARD_REFRESH_INTERVAL_MS);
 }
 
 export function stopDashboardAutoRefresh(): void {
@@ -395,6 +419,8 @@ export async function openDashboard(): Promise<void> {
     if (dashboardPanel) {
         dashboardPanel.reveal();
     } else {
+        panelDisposables.forEach(d => d.dispose());
+        panelDisposables = [];
         dashboardPanel = vscode.window.createWebviewPanel(
             'claudeDashboard', 'Dashboard', vscode.ViewColumn.One,
             { enableScripts: true },
@@ -402,51 +428,54 @@ export async function openDashboard(): Promise<void> {
         if (extensionContext) {
             dashboardPanel.iconPath = vscode.Uri.joinPath(extensionContext.extensionUri, 'claude-icon.svg');
         }
-        dashboardPanel.onDidDispose(() => {
+        panelDisposables.push(dashboardPanel.onDidDispose(() => {
             dashboardPanel = undefined;
             canPostMessage = false;
             stopDashboardAutoRefresh();
-        });
-        dashboardPanel.onDidChangeViewState(() => {
+            panelDisposables.forEach(d => d.dispose());
+            panelDisposables = [];
+        }));
+        panelDisposables.push(dashboardPanel.onDidChangeViewState(() => {
             if (dashboardPanel?.visible) {
                 canPostMessage = false; // JS context lost when hidden; need full render
                 refreshDashboard();
             }
-        });
-        dashboardPanel.webview.onDidReceiveMessage(async (msg) => {
+        }));
+        panelDisposables.push(dashboardPanel.webview.onDidReceiveMessage(async (msg) => {
             if (msg.command === 'refresh') { refreshDashboard(); }
             if (msg.command === 'open' && msg.path) {
+                if (!isPathSafe(msg.path as string)) { return; }
                 vscode.window.showTextDocument(vscode.Uri.file(msg.path));
             }
             if (msg.command === 'setting' && msg.key) {
-                const config = vscode.workspace.getConfiguration('tabTerminal');
-                const settingKey = (msg.key as string).replace('tabTerminal.', '');
+                const config = vscode.workspace.getConfiguration(CONFIG_NAMESPACE);
+                const settingKey = (msg.key as string).replace(`${CONFIG_NAMESPACE}.`, '');
                 await config.update(settingKey, msg.value, vscode.ConfigurationTarget.Global);
             }
             if (msg.command === 'fork' && msg.path && extensionContext) {
+                if (!isPathSafe(msg.path as string)) { return; }
                 await forkSession(vscode.Uri.file(msg.path).toString(), extensionContext);
                 refreshDashboard();
             }
             if (msg.command === 'close' && msg.path) {
-                const uri = vscode.Uri.file(msg.path).toString();
-                closeTerminalForEditor(uri);
-                for (const group of vscode.window.tabGroups.all) {
-                    for (const tab of group.tabs) {
-                        if (tab.input instanceof vscode.TabInputText && tab.input.uri.toString() === uri) {
-                            await vscode.window.tabGroups.close(tab);
-                        }
-                    }
-                }
+                if (!isPathSafe(msg.path as string)) { return; }
+                await closeTabByPath(msg.path as string);
                 refreshDashboard();
             }
             if (msg.command === 'create' && msg.dir) {
+                if (!isPathSafe(msg.dir as string)) { return; }
                 const name = await vscode.window.showInputBox({
                     prompt: 'New .claude file name',
                     placeHolder: 'my-task',
                     validateInput: (v) => {
                         const trimmed = v.trim();
                         if (!trimmed) { return 'Name cannot be empty'; }
-                        if (/[/\\:]/.test(trimmed.replace(/\.claude$/, ''))) { return 'Invalid characters in name'; }
+                        if (trimmed !== v) { return 'Name must not have leading or trailing spaces'; }
+                        const baseName = trimmed.replace(/\.claude$/, '');
+                        if (/[/\\:]/.test(baseName)) { return 'Invalid characters in name'; }
+                        if (/^\.{1,2}$/.test(baseName)) { return 'Name cannot be just dots'; }
+                        const RESERVED = /^(CON|PRN|NUL|AUX|COM[1-9]|LPT[1-9])$/i;
+                        if (RESERVED.test(baseName)) { return 'Reserved file name'; }
                         return undefined;
                     },
                 });
@@ -462,20 +491,13 @@ export async function openDashboard(): Promise<void> {
                 }
             }
             if (msg.command === 'delete' && msg.path) {
+                if (!isPathSafe(msg.path as string)) { return; }
                 const filePath = msg.path as string;
-                const uri = vscode.Uri.file(filePath).toString();
-                closeTerminalForEditor(uri);
-                for (const group of vscode.window.tabGroups.all) {
-                    for (const tab of group.tabs) {
-                        if (tab.input instanceof vscode.TabInputText && tab.input.uri.toString() === uri) {
-                            await vscode.window.tabGroups.close(tab);
-                        }
-                    }
-                }
+                await closeTabByPath(filePath);
                 try { fs.unlinkSync(filePath); } catch {}
                 refreshDashboard();
             }
-        });
+        }));
         startDashboardAutoRefresh();
     }
     refreshDashboard();

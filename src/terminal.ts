@@ -2,8 +2,9 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
-import { isClaudeFile, getForkBase, nextForkName } from './utils';
+import { isClaudeFile, getForkBase, nextForkName, dirToProjectName } from './utils';
 import { getConfig } from './config';
+import { SYNC_GUARD_DELAY_MS } from './constants';
 
 // ── Mutable shared state ─────────────────────────────────────────────────────
 
@@ -16,31 +17,47 @@ export const managedTerminals = new Set<vscode.Terminal>();
 /** Guard to prevent infinite loops between editor<->terminal sync */
 export let isSyncing = false;
 
+/** Depth counter for nested/overlapping withSyncGuard calls */
+let syncDepth = 0;
+
 export function setIsSyncing(value: boolean): void {
     isSyncing = value;
 }
 
 /** Execute fn while holding the sync guard, releasing after a delay */
-export function withSyncGuard(fn: () => void | PromiseLike<unknown>, delay: number = 100): void {
+export function withSyncGuard(fn: () => void | PromiseLike<unknown>, delay: number = SYNC_GUARD_DELAY_MS): void {
+    syncDepth++;
     isSyncing = true;
-    const result = fn();
-    if (result && typeof (result as PromiseLike<unknown>).then === 'function') {
-        (result as PromiseLike<unknown>).then(
-            () => setTimeout(() => { isSyncing = false; }, delay),
-            () => setTimeout(() => { isSyncing = false; }, delay),
-        );
-    } else {
-        setTimeout(() => { isSyncing = false; }, delay);
+
+    const cleanup = () => {
+        syncDepth--;
+        if (syncDepth === 0) {
+            setTimeout(() => {
+                if (syncDepth === 0) { isSyncing = false; }
+            }, delay);
+        }
+    };
+
+    try {
+        const result = fn();
+        if (result && typeof (result as PromiseLike<unknown>).then === 'function') {
+            (result as PromiseLike<unknown>).then(cleanup, cleanup);
+        } else {
+            cleanup();
+        }
+    } catch (err) {
+        cleanup();
+        throw err;
     }
 }
 
 // ── Terminal management ──────────────────────────────────────────────────────
 
-export function openTerminalForEditor(
+export async function openTerminalForEditor(
     editor: vscode.TextEditor,
     context: vscode.ExtensionContext,
     forkFromSessionId?: string,
-): void {
+): Promise<void> {
     const uri = editor.document.uri.toString();
 
     // Check if terminal already exists for this editor
@@ -102,7 +119,7 @@ export function openTerminalForEditor(
             // Fork: create new session branching from the parent, then rename
             terminal.sendText(`{ echo '/rename "${displayName}"'; exec < /dev/tty; } | claude --resume "${forkFromSessionId}" --fork-session`);
         } else {
-            const sessionId = findExistingSession(fileDir, displayName);
+            const sessionId = await findExistingSession(fileDir, displayName);
             if (sessionId) {
                 terminal.sendText(`claude --resume "${sessionId}"`);
             } else {
@@ -123,7 +140,7 @@ export async function forkSession(
     const baseName = getForkBase(sourceName);
 
     // Find the parent session ID
-    const sessionId = findExistingSession(dir, sourceName);
+    const sessionId = await findExistingSession(dir, sourceName);
     if (!sessionId) {
         vscode.window.showWarningMessage(`No Claude session found for ${sourceName}`);
         return;
@@ -134,17 +151,19 @@ export async function forkSession(
     const forkPath = path.join(dir, `${forkName}.claude`);
 
     // Create the fork .claude file
-    fs.writeFileSync(forkPath, `# Fork of ${sourceName}\n`);
+    try {
+        await fs.promises.writeFile(forkPath, `# Fork of ${sourceName}\n`);
+    } catch (err) {
+        vscode.window.showErrorMessage(`Failed to create fork: ${err}`);
+        return;
+    }
 
     // Suppress the auto-terminal listener so it doesn't race us with a non-forked session
-    isSyncing = true;
-    try {
+    withSyncGuard(async () => {
         const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(forkPath));
         const editor = await vscode.window.showTextDocument(doc);
-        openTerminalForEditor(editor, context, sessionId);
-    } finally {
-        setTimeout(() => { isSyncing = false; }, 200);
-    }
+        await openTerminalForEditor(editor, context, sessionId);
+    }, 200);
 }
 
 /**
@@ -169,26 +188,35 @@ export function closeTerminalForEditor(uri: string): void {
     }
 }
 
-export function findExistingSession(cwd: string, claudeFileName: string): string | undefined {
-    const projectDir = cwd.replace(/[/ ]/g, '-');
+export async function findExistingSession(cwd: string, claudeFileName: string): Promise<string | undefined> {
+    const projectDir = dirToProjectName(cwd);
     const sessionsDir = path.join(os.homedir(), '.claude', 'projects', projectDir);
 
-    if (!fs.existsSync(sessionsDir)) {
+    try {
+        await fs.promises.access(sessionsDir);
+    } catch {
         return undefined;
     }
 
     const needle = `Session renamed to: \\"${claudeFileName}\\"`;
     const matches: { sessionId: string; mtime: number }[] = [];
 
-    for (const file of fs.readdirSync(sessionsDir)) {
+    let files: string[];
+    try {
+        files = await fs.promises.readdir(sessionsDir);
+    } catch {
+        return undefined;
+    }
+
+    for (const file of files) {
         if (!file.endsWith('.jsonl')) {
             continue;
         }
         const filePath = path.join(sessionsDir, file);
         try {
-            const content = fs.readFileSync(filePath, 'utf-8');
+            const content = await fs.promises.readFile(filePath, 'utf-8');
             if (content.includes(needle)) {
-                const stat = fs.statSync(filePath);
+                const stat = await fs.promises.stat(filePath);
                 matches.push({
                     sessionId: path.basename(file, '.jsonl'),
                     mtime: stat.mtimeMs,

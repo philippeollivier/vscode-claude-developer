@@ -1,3 +1,7 @@
+import * as path from 'path';
+import * as os from 'os';
+import * as fs from 'fs';
+
 export function isClaudeFile(fsPath: string): boolean {
     return fsPath.endsWith('.claude');
 }
@@ -74,4 +78,43 @@ export function nextForkName(dir: string, baseName: string): string {
         // directory unreadable
     }
     return `${baseName}~${maxNum + 1}`;
+}
+
+// ── Shared utility functions ────────────────────────────────────────────────
+
+/** Convert a directory path to a project name suitable for the Claude session directory */
+export function dirToProjectName(dir: string): string {
+    return dir.replace(/[/ ]/g, '-');
+}
+
+/** Build the full path to a session JSONL log file */
+export function getSessionLogPath(dir: string, sessionId: string): string {
+    const projectDir = dirToProjectName(dir);
+    return path.join(os.homedir(), '.claude', 'projects', projectDir, sessionId + '.jsonl');
+}
+
+/** Escape a file path for safe embedding in JS string literals inside HTML */
+export function escapePathForJs(filePath: string): string {
+    return escapeHtml(filePath.replace(/\\/g, '\\\\').replace(/'/g, "\\'"));
+}
+
+/** Check whether a claude file name represents a fork (contains '~') */
+export function isForkName(name: string): boolean {
+    return name.includes('~');
+}
+
+/** Safely parse a JSON string, returning null on failure */
+export function safeJsonParse<T>(str: string): T | null {
+    try {
+        return JSON.parse(str) as T;
+    } catch {
+        return null;
+    }
+}
+
+/** Ensure a directory exists, creating it recursively if needed */
+export function ensureDirectoryExists(dirPath: string): void {
+    if (!fs.existsSync(dirPath)) {
+        fs.mkdirSync(dirPath, { recursive: true });
+    }
 }

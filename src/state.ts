@@ -1,10 +1,11 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as os from 'os';
 import { HookState, STATE_DIR } from './types';
 import { forEachClaudeTab } from './tabs';
 import { findExistingSession } from './terminal';
+import { STATE_STALE_THRESHOLD_S, STATE_WATCHER_DEBOUNCE_MS } from './constants';
+import { getSessionLogPath, safeJsonParse, ensureDirectoryExists } from './utils';
 
 // ── Mutable shared state ─────────────────────────────────────────────────────
 
@@ -36,9 +37,10 @@ export function readHookState(claudeFile: string, sessionMtime?: Date): HookStat
     try {
         const stateFile = path.join(STATE_DIR, `${claudeFile}.json`);
         if (!fs.existsSync(stateFile)) { return undefined; }
-        const state: HookState = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
-        // Ignore stale states (> 30 min)
-        if (Date.now() / 1000 - state.timestamp > 30 * 60) { return undefined; }
+        const state = safeJsonParse<HookState>(fs.readFileSync(stateFile, 'utf-8'));
+        if (!state) { return undefined; }
+        // Ignore stale states
+        if (Date.now() / 1000 - state.timestamp > STATE_STALE_THRESHOLD_S) { return undefined; }
         // If session log was modified after the state file was written, agent has resumed
         if (sessionMtime && sessionMtime.getTime() / 1000 > state.timestamp + 2) { return undefined; }
         return state;
@@ -65,26 +67,33 @@ export function statusLabel(state: HookState | undefined): { text: string; cssCl
 
 // ── Waiting agents ───────────────────────────────────────────────────────────
 
-export function getWaitingAgents(): { file: string; state: HookState }[] {
-    // Build a map of claudeFile name -> session mtime from open tabs (single pass)
+export async function getWaitingAgents(): Promise<{ file: string; state: HookState }[]> {
+    // Build a map of claudeFile name -> session mtime from open tabs
     const openSessions = new Map<string, Date | undefined>();
+    const tabEntries: { name: string; dir: string }[] = [];
     forEachClaudeTab((_uri, fsPath) => {
-        const name = path.basename(fsPath, '.claude');
-        const dir = path.dirname(fsPath);
-        const sessionId = findExistingSession(dir, name);
+        tabEntries.push({
+            name: path.basename(fsPath, '.claude'),
+            dir: path.dirname(fsPath),
+        });
+    });
+
+    // Resolve session lookups in parallel
+    await Promise.all(tabEntries.map(async ({ name, dir }) => {
+        const sessionId = await findExistingSession(dir, name);
         let mtime: Date | undefined;
         if (sessionId) {
-            const projectDir = dir.replace(/[/ ]/g, '-');
-            const logPath = path.join(os.homedir(), '.claude', 'projects', projectDir, `${sessionId}.jsonl`);
-            try { mtime = fs.statSync(logPath).mtime; } catch {}
+            const logPath = getSessionLogPath(dir, sessionId);
+            try { mtime = (await fs.promises.stat(logPath)).mtime; } catch {}
         }
         openSessions.set(name, mtime);
-    });
+    }));
 
     const waiting: { file: string; state: HookState }[] = [];
     try {
-        if (!fs.existsSync(STATE_DIR)) { return waiting; }
-        for (const file of fs.readdirSync(STATE_DIR)) {
+        await fs.promises.access(STATE_DIR);
+        const files = await fs.promises.readdir(STATE_DIR);
+        for (const file of files) {
             if (!file.endsWith('.json')) { continue; }
             const claudeFile = file.replace(/\.json$/, '');
             // Only count agents that have an open .claude tab
@@ -100,10 +109,10 @@ export function getWaitingAgents(): { file: string; state: HookState }[] {
 
 // ── Status bar ───────────────────────────────────────────────────────────────
 
-export function updateStatusBar(): void {
+export async function updateStatusBar(): Promise<void> {
     if (!statusBarItem) { return; }
 
-    const waiting = getWaitingAgents();
+    const waiting = await getWaitingAgents();
     const permCount = waiting.filter(w => w.state.type === 'permission_prompt').length;
     const idleCount = waiting.filter(w => w.state.type === 'idle_prompt').length;
 
@@ -139,10 +148,10 @@ export function startGlobalStateWatcher(): void {
     stopGlobalStateWatcher();
 
     try {
-        if (!fs.existsSync(STATE_DIR)) { fs.mkdirSync(STATE_DIR, { recursive: true }); }
+        ensureDirectoryExists(STATE_DIR);
         globalStateWatcher = fs.watch(STATE_DIR, () => {
             if (stateWatchDebounce) { clearTimeout(stateWatchDebounce); }
-            stateWatchDebounce = setTimeout(onStateDirectoryChanged, 500);
+            stateWatchDebounce = setTimeout(onStateDirectoryChanged, STATE_WATCHER_DEBOUNCE_MS);
         });
     } catch {
         // state dir watch failed
