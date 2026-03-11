@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
-import { isClaudeFile } from './utils';
+import { isClaudeFile, getForkBase, nextForkName } from './utils';
 import { getConfig } from './config';
 
 // ── Mutable shared state ─────────────────────────────────────────────────────
@@ -36,7 +36,11 @@ export function withSyncGuard(fn: () => void | PromiseLike<unknown>, delay: numb
 
 // ── Terminal management ──────────────────────────────────────────────────────
 
-export function openTerminalForEditor(editor: vscode.TextEditor, context: vscode.ExtensionContext): void {
+export function openTerminalForEditor(
+    editor: vscode.TextEditor,
+    context: vscode.ExtensionContext,
+    forkFromSessionId?: string,
+): void {
     const uri = editor.document.uri.toString();
 
     // Check if terminal already exists for this editor
@@ -94,12 +98,52 @@ export function openTerminalForEditor(editor: vscode.TextEditor, context: vscode
 
     // Auto-start claude for .claude files
     if (isClaudeDoc) {
-        const sessionId = findExistingSession(fileDir, displayName);
-        if (sessionId) {
-            terminal.sendText(`claude --resume "${sessionId}"`);
+        if (forkFromSessionId) {
+            // Fork: create new session branching from the parent, then rename
+            terminal.sendText(`{ echo '/rename "${displayName}"'; exec < /dev/tty; } | claude --resume "${forkFromSessionId}" --fork-session`);
         } else {
-            terminal.sendText(`{ echo '/rename "${displayName}"'; exec < /dev/tty; } | claude`);
+            const sessionId = findExistingSession(fileDir, displayName);
+            if (sessionId) {
+                terminal.sendText(`claude --resume "${sessionId}"`);
+            } else {
+                terminal.sendText(`{ echo '/rename "${displayName}"'; exec < /dev/tty; } | claude`);
+            }
         }
+    }
+}
+
+/** Fork an existing .claude session: create a new .claude file and terminal branching from the parent */
+export async function forkSession(
+    sourceUri: string,
+    context: vscode.ExtensionContext,
+): Promise<void> {
+    const sourcePath = vscode.Uri.parse(sourceUri).fsPath;
+    const dir = path.dirname(sourcePath);
+    const sourceName = path.basename(sourcePath, '.claude');
+    const baseName = getForkBase(sourceName);
+
+    // Find the parent session ID
+    const sessionId = findExistingSession(dir, sourceName);
+    if (!sessionId) {
+        vscode.window.showWarningMessage(`No Claude session found for ${sourceName}`);
+        return;
+    }
+
+    // Determine the fork name
+    const forkName = nextForkName(dir, baseName);
+    const forkPath = path.join(dir, `${forkName}.claude`);
+
+    // Create the fork .claude file
+    fs.writeFileSync(forkPath, `# Fork of ${sourceName}\n`);
+
+    // Suppress the auto-terminal listener so it doesn't race us with a non-forked session
+    isSyncing = true;
+    try {
+        const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(forkPath));
+        const editor = await vscode.window.showTextDocument(doc);
+        openTerminalForEditor(editor, context, sessionId);
+    } finally {
+        setTimeout(() => { isSyncing = false; }, 200);
     }
 }
 

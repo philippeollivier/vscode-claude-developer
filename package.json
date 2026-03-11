@@ -44,6 +44,11 @@
         "command": "tabTerminal.goToNotification",
         "title": "Go to Latest Notification",
         "category": "Claude Developer"
+      },
+      {
+        "command": "tabTerminal.forkSession",
+        "title": "Fork Current Session",
+        "category": "Claude Developer"
       }
     ],
     "keybindings": [

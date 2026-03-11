@@ -9,6 +9,13 @@ export interface HookState {
     message: string;
 }
 
+export interface SubagentInfo {
+    id: string;
+    description: string;
+    subagentType: string; // 'Explore', 'Plan', 'general', etc.
+    running: boolean;
+}
+
 export interface SessionInfo {
     claudeFile: string;
     dir: string;

@@ -11,6 +11,7 @@ import {
     closeTerminalForEditor,
     cleanupTerminal,
     withSyncGuard,
+    forkSession,
 } from './terminal';
 import {
     setStatusBarItem,
@@ -227,6 +228,18 @@ export function activate(context: vscode.ExtensionContext) {
         }
     }
 
+    const forkCommand = vscode.commands.registerCommand(
+        'tabTerminal.forkSession',
+        async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor || !isClaudeFile(editor.document.uri.fsPath)) {
+                vscode.window.showInformationMessage('Open a .claude file to fork');
+                return;
+            }
+            await forkSession(editor.document.uri.toString(), context);
+        }
+    );
+
     const closeNonClaudeCommand = vscode.commands.registerCommand(
         'tabTerminal.closeNonClaudeFiles',
         () => closeNonClaudeFiles()
@@ -287,6 +300,7 @@ export function activate(context: vscode.ExtensionContext) {
         openTerminalCommand,
         closeTerminalCommand,
         toggleAutoCommand,
+        forkCommand,
         closeNonClaudeCommand,
         dashboardCommand,
         goToNotificationCommand,
