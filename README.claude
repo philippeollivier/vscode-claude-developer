@@ -1,0 +1,588 @@
+# Claude Developer
+
+A VS Code extension that turns VS Code into a management hub for multiple concurrent Claude Code agents. Each `.claude` file acts as a control surface for one agent session, with automatic terminal pairing, session persistence, real-time status monitoring, session forking, subagent tracking, and a unified dashboard.
+
+## Prerequisites
+
+- **VS Code** 1.85.0+
+- **Claude CLI** installed and in PATH (`npm install -g @anthropic-ai/claude-code`)
+- **terminal-notifier** (optional, for click-to-navigate macOS notifications): `brew install terminal-notifier`
+- **jq** (required by the audit log hook): `brew install jq`
+
+## Installation
+
+```bash
+cd "/path/to/vscode-claude-developer"
+npm install
+npm run compile
+```
+
+Then reload VS Code (`Cmd+Shift+P` > "Reload Window"). The extension activates automatically on startup.
+
+## Setup
+
+The extension reads hook state files to track agent status. You need to configure Claude Code hooks and place the hook scripts.
+
+### 1. Create hook scripts
+
+Create the directory and scripts:
+
+```bash
+mkdir -p ~/.claude/hooks/state
+```
+
+#### `~/.claude/hooks/notify.sh`
+
+Triggered when Claude is waiting for user input. Writes a state file and sends a macOS notification.
+
+```bash
+#!/usr/bin/env bash
+INPUT=$(cat)
+
+TYPE=$(echo "$INPUT" | grep -o '"notification_type":"[^"]*"' | cut -d'"' -f4)
+CWD=$(echo "$INPUT" | grep -o '"cwd":"[^"]*"' | cut -d'"' -f4)
+
+if [ -n "$CLAUDE_FILE" ]; then
+    TAB_NAME="$CLAUDE_FILE"
+    CLAUDE_FILE_PATH="$CWD/$CLAUDE_FILE.claude"
+else
+    TAB_NAME=$(basename "$CWD")
+fi
+
+case "$TYPE" in
+  permission_prompt) MSG="Needs permission to proceed" ;;
+  idle_prompt)       MSG="Finished and waiting for input" ;;
+  *)                 MSG="Waiting for your input" ;;
+esac
+
+STATE_DIR="$HOME/.claude/hooks/state"
+mkdir -p "$STATE_DIR"
+if [ -n "$CLAUDE_FILE" ]; then
+    echo "{\"type\":\"$TYPE\",\"timestamp\":$(date +%s),\"message\":\"$MSG\",\"cwd\":\"$CWD\",\"tab\":\"$TAB_NAME\"}" > "$STATE_DIR/$CLAUDE_FILE.json"
+fi
+
+if command -v terminal-notifier &>/dev/null; then
+    ARGS=(
+        -title "Claude Code — $TAB_NAME"
+        -message "$MSG"
+        -sound Glass
+        -group "claude-$TAB_NAME"
+    )
+    if [ -n "$CLAUDE_FILE_PATH" ] && [ -f "$CLAUDE_FILE_PATH" ]; then
+        ARGS+=(-execute "open -a 'Visual Studio Code' '$CLAUDE_FILE_PATH'")
+    else
+        ARGS+=(-activate com.microsoft.VSCode)
+    fi
+    terminal-notifier "${ARGS[@]}"
+else
+    osascript -e "display notification \"$MSG\" with title \"Claude Code — $TAB_NAME\" sound name \"Glass\""
+fi
+```
+
+#### `~/.claude/hooks/clear-state.sh`
+
+Triggered after every tool execution. Removes the state file so the dashboard knows Claude resumed work.
+
+```bash
+#!/usr/bin/env bash
+if [ -n "$CLAUDE_FILE" ]; then
+    STATE_FILE="$HOME/.claude/hooks/state/$CLAUDE_FILE.json"
+    [ -f "$STATE_FILE" ] && rm -f "$STATE_FILE"
+fi
+```
+
+#### `~/.claude/hooks/log-approved.sh` (optional)
+
+Audit log of every approved tool use for tracking common permission requests.
+
+```bash
+#!/usr/bin/env bash
+LOG_DIR="$HOME/.claude/hooks/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/approved-operations.log"
+
+INPUT=$(cat)
+TOOL=$(echo "$INPUT" | jq -r '.tool_name // empty')
+[ -z "$TOOL" ] && exit 0
+
+TS=$(date '+%Y-%m-%d %H:%M:%S')
+SESSION=$(echo "$INPUT" | jq -r '.session_id // "unknown"' | head -c 12)
+TAB="${CLAUDE_FILE:-unknown}"
+
+case "$TOOL" in
+  Bash)     SUMMARY=$(echo "$INPUT" | jq -r '.tool_input.command // empty' | head -c 200) ;;
+  Edit|Write|Read) SUMMARY=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty') ;;
+  Grep)     SUMMARY="pattern=$(echo "$INPUT" | jq -r '.tool_input.pattern // empty')" ;;
+  Glob)     SUMMARY="glob=$(echo "$INPUT" | jq -r '.tool_input.pattern // empty')" ;;
+  WebFetch) SUMMARY=$(echo "$INPUT" | jq -r '.tool_input.url // empty') ;;
+  WebSearch) SUMMARY=$(echo "$INPUT" | jq -r '.tool_input.query // empty') ;;
+  Agent)    SUMMARY=$(echo "$INPUT" | jq -r '.tool_input.description // empty') ;;
+  *)        SUMMARY=$(echo "$INPUT" | jq -c '.tool_input // {}' | head -c 200) ;;
+esac
+
+echo "$TS | $TAB | $TOOL | $SUMMARY" >> "$LOG_FILE"
+```
+
+Make them executable:
+
+```bash
+chmod +x ~/.claude/hooks/notify.sh ~/.claude/hooks/clear-state.sh ~/.claude/hooks/log-approved.sh
+```
+
+### 2. Configure Claude Code hooks
+
+Add the following to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/YOUR_USERNAME/.claude/hooks/notify.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/YOUR_USERNAME/.claude/hooks/clear-state.sh"
+          },
+          {
+            "type": "command",
+            "command": "/Users/YOUR_USERNAME/.claude/hooks/log-approved.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Replace `YOUR_USERNAME` with your macOS username.
+
+### 3. Auto-approve `.claude` file edits (optional)
+
+Add these to the `permissions` array in `~/.claude/settings.json` so agents can freely update their linked `.claude` files:
+
+```json
+"permissions": {
+  "allow": [
+    "Edit(file_path:*.claude)",
+    "Write(file_path:*.claude)"
+  ]
+}
+```
+
+## Usage
+
+### Creating sessions
+
+Create a `.claude` file in any project directory. The extension automatically pairs it with a terminal running Claude Code. You can also use the **+** button on each directory header in the dashboard.
+
+### Dashboard (`Cmd+D`)
+
+The dashboard shows all open `.claude` files as cards, grouped by directory:
+
+- **Status pill** — Active (green), Pending Permission (amber), Waiting on User (blue)
+- **Timestamps** — Relative time since last session activity
+- **Message tail** — Last N messages from the session log, markdown-rendered
+- **Running subagents** — Pulsing green dots showing active Agent tool calls
+- **Controls** — Fork (⌇), Delete (forks only), Close (✕)
+- **+ button** — Create new `.claude` files per directory
+
+The dashboard auto-refreshes every 10 seconds and instantly on hook state changes.
+
+### Forking sessions
+
+Fork any session to run parallel agents on the same context:
+
+1. Click the ⌇ button on a card, or run "Fork Current Session" from the command palette
+2. A new file `name~2.claude` is created with its own terminal
+3. The fork starts from the parent session's full conversation history
+4. Forks appear indented under their parent in the dashboard
+
+### Notifications
+
+When Claude is waiting for input, you'll receive:
+- A macOS notification (click to navigate to the file)
+- A VS Code warning notification with "Go to File" action
+- A status change on the dashboard card
+
+Use `Cmd+Shift+D` to jump to the most recent waiting agent.
+
+## Commands
+
+| Command | Keybinding | Description |
+|---------|------------|-------------|
+| Open Dashboard | `Cmd+D` | Show the dashboard WebView |
+| Go to Latest Notification | `Cmd+Shift+D` | Jump to the most recent waiting agent |
+| Fork Current Session | — | Fork the active `.claude` session |
+| Open Terminal for Current Tab | — | Manually open a paired terminal |
+| Close Terminal for Current Tab | — | Close the paired terminal |
+| Toggle Auto Terminal | — | Toggle automatic terminal pairing |
+| Close All Non-Claude Files | — | Close non-`.claude` tabs and unmanaged terminals |
+
+## Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `tabTerminal.autoOpenTerminal` | `false` | Auto-open terminal when switching to a `.claude` tab |
+| `tabTerminal.terminalLocation` | `"right"` | Terminal placement: `"right"` or `"below"` |
+| `tabTerminal.autoSetupOnStart` | `true` | On startup, close clutter and open all terminals |
+| `tabTerminal.confirmCloseClaudeFile` | `true` | Confirm before closing a `.claude` file with a running terminal |
+
+Settings are also accessible from the dashboard's collapsible settings panel.
+
+## How it works
+
+### Session persistence
+
+- Each `.claude` file maps to a Claude Code session via `/rename`
+- Sessions are stored as JSONL at `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`
+- The extension scans these files for `Session renamed to: "<name>"` to match files to sessions
+- Reopening a `.claude` file automatically resumes the previous session
+
+### Hook state lifecycle
+
+1. Claude finishes a task and waits → `Notification` hook fires → `notify.sh` writes `~/.claude/hooks/state/<name>.json`
+2. Extension's `fs.watch` detects the new file within 500ms → dashboard refreshes, VS Code notification appears
+3. User responds → Claude executes a tool → `PostToolUse` hook fires → `clear-state.sh` deletes the state file
+4. State files older than 30 minutes are automatically ignored
+
+### Subagent tracking
+
+When a session spawns agents via the `Agent` tool:
+- **Foreground agents**: Tracked by checking for a matching `tool_result` in the JSONL
+- **Background agents**: The extension reads `<session>/subagents/agent-<id>.jsonl` and checks if it was modified within the last 30 seconds
+- Only running agents are shown in the dashboard; completed agents are hidden
+- Results are cached by file mtime + size to avoid re-reading large logs
+
+## Project structure
+
+```
+src/
+  extension.ts    Entry point: commands, event listeners, lifecycle
+  dashboard.ts    Dashboard WebView: HTML/CSS, message handling, auto-refresh
+  session.ts      JSONL log parsing: tail messages, subagent tracking
+  terminal.ts     Terminal lifecycle: create, find session, fork, sync guard
+  state.ts        Hook state watcher, status bar, waiting agent detection
+  utils.ts        Shared utilities: path helpers, escaping, markdown
+  types.ts        TypeScript interfaces
+  tabs.ts         Tab iteration helpers
+  config.ts       Configuration reader
+  constants.ts    Named constants (thresholds, intervals)
+```
+
+
+
+# Claude Developer — VS Code Extension
+
+A VS Code extension that turns VS Code into a management hub for multiple concurrent Claude Code agents. Each `.claude` file acts as a control surface for one agent session, with automatic terminal pairing, session persistence, real-time status monitoring, session forking, subagent tracking, and a unified dashboard.
+
+---
+
+## High-Level Goals
+
+1. **Multi-agent orchestration** — Run many Claude Code sessions side-by-side and never lose track of any.
+2. **Context switching solved** — Dashboard + macOS notifications + in-editor VS Code notifications ensure you know instantly when an agent needs attention.
+3. **Session persistence** — Closing and reopening a `.claude` file resumes the same Claude Code session automatically.
+4. **Session forking** — Fork any session to run parallel agents on the same workflow.
+5. **Minimal friction** — Auto-terminal, auto-link, auto-close clutter, one-key dashboard.
+
+---
+
+## Architecture Overview
+
+```
+┌─────────────────────────────────────────────┐
+│  VS Code                                     │
+│  ┌──────────────┐  ┌──────────────────────┐ │
+│  │  .claude file │──│  Paired terminal     │ │
+│  │  (left pane)  │  │  running `claude`    │ │
+│  └──────────────┘  └──────────────────────┘ │
+│                                              │
+│  ┌──────────────────────────────────────┐   │
+│  │  Dashboard WebView (Cmd+D)           │   │
+│  │  — cards per open .claude file       │   │
+│  │  — real-time status from hooks       │   │
+│  │  — last N messages (markdown)        │   │
+│  │  — running subagent tracking         │   │
+│  │  — fork / create / close controls    │   │
+│  └──────────────────────────────────────┘   │
+│                                              │
+│  Global State Watcher (fs.watch)             │
+│  → refreshes dashboard                       │
+│  → shows VS Code warning notifications       │
+└─────────────────────────────────────────────┘
+         │                    ▲
+         │ CLAUDE_FILE env    │ fs.watch
+         ▼                    │
+┌─────────────────────────────────────────────┐
+│  ~/.claude/hooks/                            │
+│  ├── notify.sh         (Notification hook)   │
+│  ├── clear-state.sh    (PostToolUse hook)    │
+│  └── state/                                  │
+│      ├── MyAgent.json  ← written by notify   │
+│      └── ...           ← cleared by clear    │
+└─────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────┐
+│  ~/.claude/projects/<encoded-cwd>/           │
+│  ├── <session-id>.jsonl  (session logs)      │
+│  └── <session-id>/subagents/                 │
+│      └── agent-<id>.jsonl  (subagent logs)   │
+└─────────────────────────────────────────────┘
+```
+
+---
+
+## Extension Source
+
+**Location:** `/Users/philippe/Todo/Claude Improvements/vscode-claude-developer/`
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `src/extension.ts` | ~335 | Entry point: command registration, event listeners, lifecycle |
+| `src/dashboard.ts` | ~510 | Dashboard WebView: HTML/CSS generation, message handling, auto-refresh |
+| `src/session.ts` | ~241 | JSONL log parsing: tail messages, subagent tracking with caching |
+| `src/terminal.ts` | ~237 | Terminal lifecycle: create, find session, fork, sync guard |
+| `src/state.ts` | ~164 | Hook state watcher, status bar, waiting agent detection |
+| `src/utils.ts` | ~120 | Shared utilities: path helpers, escaping, markdown rendering |
+| `src/types.ts` | ~83 | TypeScript interfaces: SessionInfo, SubagentInfo, LogEntry, etc. |
+| `src/tabs.ts` | ~70 | Tab iteration: getOpenClaudeFiles, findTabsByUri, forEachClaudeTab |
+| `src/config.ts` | ~38 | Configuration reader (DashboardSettings) |
+| `src/constants.ts` | ~22 | Named constants: thresholds, intervals, config namespace |
+| `package.json` | | Manifest: commands, keybindings, settings |
+| `claude-icon.svg` | | Icon for terminals and dashboard |
+
+**Build & install:**
+```bash
+cd "/Users/philippe/Todo/Claude Improvements/vscode-claude-developer"
+npm run compile
+```
+Then reload VS Code (`Cmd+Shift+P` → "Reload Window"). Extension auto-installs from workspace.
+
+---
+
+## Features
+
+### 1. Automatic Terminal Pairing
+
+When a `.claude` file is opened and auto-terminal is enabled, the extension:
+- Creates a split terminal to the right of the editor
+- Sets `CLAUDE_FILE=<filename>` as an env var on the terminal
+- Sets the terminal name and icon (Claude icon)
+- Auto-starts Claude Code (resuming existing session or creating a new one with `/rename`)
+
+**Session lookup logic** (`findExistingSession()` in `terminal.ts`):
+- Encodes the cwd via `dirToProjectName()` (replaces `/` and spaces with `-`)
+- Scans `~/.claude/projects/<encoded-cwd>/*.jsonl` for files containing `Session renamed to: \"<name>\"`
+- Returns the most recently modified match
+- If no match: pipes `/rename "<name>"` into a fresh `claude` process
+
+### 2. Editor ↔ Terminal Sync
+
+- Switching to a `.claude` tab reveals its paired terminal
+- Clicking a managed terminal reveals its paired `.claude` editor
+- A depth-counted `withSyncGuard()` prevents infinite focus-swap loops and handles nested/overlapping calls
+
+### 3. Session Forking
+
+Fork any session to run parallel agents on the same context:
+- Creates a new `.claude` file with `name~N` naming convention (e.g., `hugh~2.claude`)
+- Uses `claude --resume "<parent-session-id>" --fork-session` with piped `/rename`
+- Each fork gets its own terminal, preserving the 1:1 file↔terminal model
+- Dashboard shows forks indented under their parent with a ⑂ glyph
+- Fork button (⌇) on each card, also available via command palette
+
+**Utilities** in `utils.ts`: `parseForkName()`, `getForkBase()`, `nextForkName()`
+
+### 4. Dashboard (Cmd+D)
+
+A WebView panel (with CSP) showing all open `.claude` files as cards.
+
+**Each card displays:**
+- File name (bold header)
+- Status indicator (colored pill): Active / Pending Permission / Waiting on User
+- Time since last session activity (e.g. "5m ago")
+- Last N messages from the session log (markdown-rendered)
+- Running subagents (pulsing green dots with description and type)
+- Fork (⌇), Delete (🗑, forks only), and Close (✕) buttons
+
+**Per-directory features:**
+- Cards grouped by parent directory with color-coded accent borders
+- **+ button** on each directory header to create new `.claude` files (with input validation)
+
+**Scroll anchoring:** Uses `postMessage`-based incremental content updates. Before swapping innerHTML, finds the first visible card as an anchor; after swap, scrolls to keep that card at the same viewport position.
+
+**Auto-refresh triggers:**
+- Global `fs.watch` on `~/.claude/hooks/state/` — fires within 500ms of any hook state change
+- 10-second interval timer as fallback
+- Panel visibility change (full re-render when dashboard becomes visible)
+
+**Security:**
+- Content Security Policy blocks external resource loading
+- Path validation (`isPathSafe()`) on all webview messages
+- Input validation for file creation (reserved names, traversal, special characters)
+- Event listener disposables properly tracked and cleaned up
+
+### 5. Subagent Tracking
+
+The dashboard tracks running Agent tool_use calls per session:
+- Parses session JSONL logs for `tool_use` blocks with `name: "Agent"`
+- **Foreground agents**: Running if no matching `tool_result` exists yet
+- **Background agents** (`run_in_background: true`): Extracts `agentId` from the "Async agent launched" confirmation, then checks `<session>/subagents/agent-<agentId>.jsonl` mtime — running if modified within 30s
+- Only running agents are displayed (done agents hidden)
+- Results cached by logPath with mtime+size validation to avoid re-reading large files
+
+### 6. Close All Non-Claude Files
+
+Command that closes every tab that isn't a `.claude` file or the dashboard. Also disposes unmanaged terminals. Runs automatically on extension activation if `autoSetupOnStart` is enabled.
+
+### 7. Custom Editor Labels
+
+On activation, sets `workbench.editor.customLabels.patterns` so `.claude` files display as just `filename` without the extension.
+
+### 8. Close Confirmation
+
+Closing a `.claude` file that has a paired terminal triggers a confirmation dialog, since it will also kill the terminal (and thus the Claude session). Configurable via settings.
+
+### 9. In-Editor Notifications
+
+When a hook state file is created (agent needs attention), the extension shows a VS Code warning notification with action buttons. The global state watcher runs independently of the dashboard, so notifications appear even when the dashboard is closed. Duplicate notifications are suppressed by tracking timestamps per agent.
+
+---
+
+## Commands
+
+| Command ID | Title | Keybinding |
+|------------|-------|------------|
+| `tabTerminal.openTerminalForTab` | Open Terminal for Current Tab | — |
+| `tabTerminal.closeTerminalForTab` | Close Terminal for Current Tab | — |
+| `tabTerminal.toggleAutoTerminal` | Toggle Auto Terminal | — |
+| `tabTerminal.closeNonClaudeFiles` | Close All Non-Claude Files | — |
+| `tabTerminal.openDashboard` | Open Dashboard | `Cmd+D` |
+| `tabTerminal.goToNotification` | Go to Latest Notification | `Cmd+Shift+D` |
+| `tabTerminal.forkSession` | Fork Current Session | — |
+
+All commands are categorized under "Claude Developer" in the command palette.
+
+---
+
+## Settings
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `tabTerminal.autoOpenTerminal` | boolean | `false` | Auto-open terminal for new `.claude` tabs |
+| `tabTerminal.terminalLocation` | `"right"` \| `"below"` | `"right"` | Terminal placement relative to editor |
+| `tabTerminal.autoSetupOnStart` | boolean | `true` | Close non-.claude files and open all terminals on startup |
+| `tabTerminal.confirmCloseClaudeFile` | boolean | `true` | Show confirmation dialog when closing a .claude file |
+
+---
+
+## Hook System
+
+The extension relies on two Claude Code hooks configured in `~/.claude/settings.json`:
+
+### Notification Hook (`notify.sh`)
+
+**Trigger:** `Notification` (fires when Claude is waiting for user input)
+
+**What it does:**
+1. Reads the hook JSON payload to get `notification_type` and `cwd`
+2. Uses `CLAUDE_FILE` env var (set by the extension's terminal) to identify which agent
+3. Writes a JSON state file to `~/.claude/hooks/state/$CLAUDE_FILE.json`
+4. Sends a macOS notification via `terminal-notifier` or falls back to `osascript`
+5. The extension's global state watcher detects the new file and shows an in-editor VS Code notification
+
+### Clear State Hook (`clear-state.sh`)
+
+**Trigger:** `PostToolUse` (fires after every tool execution, meaning Claude resumed work)
+
+**What it does:**
+- Deletes `~/.claude/hooks/state/$CLAUDE_FILE.json` if it exists
+
+### Stale State Handling
+
+The extension ignores hook state files older than 30 minutes (`STATE_STALE_THRESHOLD_S`), preventing stale indicators from lingering.
+
+---
+
+## Claude Code Session Storage
+
+- Sessions are JSONL files at `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`
+- Path encoding via `dirToProjectName()`: cwd with `/` and spaces replaced by `-`
+- Session names stored as entries containing `Session renamed to: \"<name>\"`
+- Subagent logs at `<session-id>/subagents/agent-<agentId>.jsonl`
+- The extension reads these to match `.claude` file names to session IDs
+
+---
+
+## Key Constants (`constants.ts`)
+
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| `STATE_STALE_THRESHOLD_S` | 1800 (30min) | Ignore hook state files older than this |
+| `STATE_WATCHER_DEBOUNCE_MS` | 500 | Debounce fs.watch events |
+| `TAIL_CHUNK_SIZE` | 262144 (256KB) | Bytes to read from end of JSONL for tail |
+| `SUBAGENT_ACTIVE_THRESHOLD_MS` | 30000 | Background agent considered running if JSONL modified within this |
+| `DASHBOARD_REFRESH_INTERVAL_MS` | 10000 | Dashboard auto-refresh interval |
+| `SYNC_GUARD_DELAY_MS` | 100 | Delay before releasing sync guard |
+| `CONFIG_NAMESPACE` | `'tabTerminal'` | VS Code configuration namespace |
+
+---
+
+## Shared Utilities (`utils.ts`)
+
+| Function | Purpose |
+|----------|---------|
+| `dirToProjectName(dir)` | Convert directory path to Claude projects name |
+| `getSessionLogPath(dir, sessionId)` | Build full path to session JSONL |
+| `escapePathForJs(path)` | Escape path for use in HTML onclick handlers |
+| `isForkName(name)` | Check if a name contains the fork suffix (~N) |
+| `safeJsonParse<T>(str)` | JSON.parse with try/catch, returns null on failure |
+| `ensureDirectoryExists(dir)` | Create directory recursively if missing |
+| `escapeHtml(str)` | HTML entity escaping |
+| `renderMarkdown(str)` | Basic markdown → HTML (bold, italic, code, headers, lists) |
+| `hexToRgba(hex, alpha)` | Convert hex color to rgba string |
+| `timeAgo(date)` | Human-readable relative time |
+| `isClaudeFile(path)` | Check if path ends with .claude |
+| `parseForkName(name)` | Parse "name~2" into { base, forkNum } |
+| `getForkBase(name)` | Get base name from fork name |
+| `nextForkName(dir, base)` | Scan directory and return next fork number |
+
+---
+
+## Future Improvements (Backlog)
+
+### High Impact
+
+- **Status bar indicator** — Persistent item in the bottom-left showing `2 agents need attention`, clickable to cycle through them
+- **Sort cards by status priority** — Show "Pending Permission" cards first, then "Waiting on User", then "Active"
+- **Cycle through notifications** — Make `Cmd+Shift+D` cycle through all waiting agents, not just the most recent
+
+### Medium Impact
+
+- **Dashboard tab badge** — Show a count of agents needing attention in the VS Code activity bar or tab title
+- **Token/cost tracking per session** — Parse session JSONL for usage metadata and display per card
+
+### Low Priority
+
+- **Bulk approve pending permissions** — One-click to approve all waiting permission prompts
+- **Group actions** — Restart all / close all agents within a directory group
+- **Session health detection** — Detect crashed or stale sessions and flag them
+
+
+### HUMAN WRITTEN NOTES SECTION
+
+#### Reducing permissions/bash
+ADD a hook whenever it tries to run a bash command or permission request that was approved. store it in a file somewhere so we can track what is normally requested
