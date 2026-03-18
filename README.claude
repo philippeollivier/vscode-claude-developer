@@ -129,13 +129,88 @@ Make them executable:
 chmod +x ~/.claude/hooks/notify.sh ~/.claude/hooks/clear-state.sh ~/.claude/hooks/log-approved.sh
 ```
 
-### 2. Configure Claude Code hooks
+### 2. Compound command auto-approval (recommended)
+
+Claude Code blocks compound commands (`cd ~/project && git status`) even when each subcommand is individually allowed. This hook system solves that by splitting compound commands and checking each part against your permission rules.
+
+#### How it works
+
+1. **PreToolUse hook** (`compound-bash-allow.py`): When Claude runs a compound Bash command, splits it into subcommands and checks each against aggregated allow rules from ALL `.claude/settings*.json` files across your projects. If all subcommands are allowed (and none match global deny/ask rules), auto-approves without a dialog.
+
+2. **PostToolUse hook** (`compound-bash-learn.py`): When you manually approve a compound command that had unknown subcommands, auto-adds generalized permission patterns to your global settings so you won't be asked again.
+
+#### Install
+
+Create the directories and Python modules:
+
+```bash
+mkdir -p ~/.claude/hooks/lib ~/.claude/hooks/state/compound-bash
+```
+
+The hook consists of these files:
+
+| File | Purpose |
+|------|---------|
+| `~/.claude/hooks/compound-bash-allow.py` | PreToolUse hook — splits and checks compound commands |
+| `~/.claude/hooks/compound-bash-learn.py` | PostToolUse hook — auto-adds patterns after manual approval |
+| `~/.claude/hooks/compound-bash-config.json` | Configuration (scan dirs, target file, options) |
+| `~/.claude/hooks/lib/command_splitter.py` | Tokenizer: splits on `&&`, `\|\|`, `;`, `\|` respecting quotes/subshells |
+| `~/.claude/hooks/lib/pattern_matcher.py` | Loads rules from all settings files, matches with fnmatch |
+| `~/.claude/hooks/lib/pattern_generator.py` | Generalizes specific commands into `Bash(cmd *)` patterns |
+
+#### Configuration (`compound-bash-config.json`)
+
+```json
+{
+  "scan_directories": ["~/Todo", "~/diseaseTools"],
+  "auto_add_target": "~/.claude/settings.json",
+  "max_scan_depth": 5,
+  "pipe_commands_require_rules": false,
+  "debug": false
+}
+```
+
+| Key | Description |
+|-----|-------------|
+| `scan_directories` | Directories to recursively scan for `.claude/settings*.json` files |
+| `auto_add_target` | Settings file where learned patterns are auto-added |
+| `max_scan_depth` | Max directory depth for scanning |
+| `pipe_commands_require_rules` | If `false` (default), only the first command in a pipe chain needs a rule. If `true`, every pipe segment must match. |
+| `debug` | Write debug logs to `~/.claude/hooks/logs/compound-bash.log` |
+
+#### Rule aggregation logic
+
+- **Allow rules**: Aggregated from ALL settings files (global + every project under scan directories). More sources = more compound commands auto-approved.
+- **Deny rules**: Only from global `~/.claude/settings.json`. Project-level deny rules (e.g., diseaseTools denying `cd`) are project-specific and don't block compound commands globally.
+- **Ask rules**: Only from global settings, same reasoning as deny.
+- **Evaluation order**: deny (fall through) > ask (fall through) > allow (auto-approve) > unknown (fall through + learn).
+
+#### Pattern learning
+
+When you manually approve a compound command with unknown subcommands:
+1. The PreToolUse hook writes a state file with the missing patterns
+2. The PostToolUse hook reads it, generates generalized patterns, and adds them to `auto_add_target`
+3. Example: approving `cd ~/foo && mycmd --flag value` adds `Bash(mycmd *)` to global settings
+4. Learned patterns are logged to `~/.claude/hooks/logs/compound-bash.log`
+
+### 3. Configure Claude Code hooks
 
 Add the following to `~/.claude/settings.json`:
 
 ```json
 {
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/YOUR_USERNAME/.claude/hooks/compound-bash-allow.py"
+          }
+        ]
+      }
+    ],
     "Notification": [
       {
         "matcher": "",
@@ -160,6 +235,15 @@ Add the following to `~/.claude/settings.json`:
             "command": "/Users/YOUR_USERNAME/.claude/hooks/log-approved.sh"
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/YOUR_USERNAME/.claude/hooks/compound-bash-learn.py"
+          }
+        ]
       }
     ]
   }
@@ -168,7 +252,7 @@ Add the following to `~/.claude/settings.json`:
 
 Replace `YOUR_USERNAME` with your macOS username.
 
-### 3. Auto-approve `.claude` file edits (optional)
+### 4. Auto-approve `.claude` file edits (optional)
 
 Add these to the `permissions` array in `~/.claude/settings.json` so agents can freely update their linked `.claude` files:
 
@@ -279,9 +363,36 @@ src/
   tabs.ts         Tab iteration helpers
   config.ts       Configuration reader
   constants.ts    Named constants (thresholds, intervals)
+
+claude-hooks-and-skills/
+  README.md                              Index with quick install instructions
+  hooks/
+    notify-sh.md                         Notification hook (state files + macOS alerts)
+    clear-state-sh.md                    PostToolUse hook (clears state on resume)
+    log-approved-sh.md                   Audit log of approved tool uses
+    compound-bash-auto-approval.md       Auto-approve compound commands system
+  skills/
+    orchestrator.md                      /orchestrator — parallel sub-agent delegation
+    summarize-and-move-to-archive.md     /summarize-and-move-to-archive — archive .claude files
+    add-worklog.md                       /add-worklog — add worklog entry
+    update-worklog.md                    /update-worklog — batch update worklog
+    add-summary.md                       /add-summary — add/replace summary section
+    update-skills-documentation.md       /update-skills-documentation — scan and catalog skills
+    split-branch-into-prs.md             /split-branch-into-prs — stacked PR creation
+    fix-dt-issue-and-pr.md               /fix-dt-issue-and-pr — end-to-end issue fix
 ```
 
+## Hooks and skills documentation
 
+All custom hooks and slash commands are documented in [`claude-hooks-and-skills/`](claude-hooks-and-skills/README.md). Each file contains:
+- What it does and when it triggers
+- The full source code
+- Install instructions (copy paths + settings.json registration)
+- Dependencies
+
+See [`claude-hooks-and-skills/README.md`](claude-hooks-and-skills/README.md) for the quick install guide.
+
+---
 
 # Claude Developer — VS Code Extension
 
