@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { isClaudeFile } from './utils';
-import { forEachClaudeTab, findTabsByUri } from './tabs';
+import { forEachClaudeTab, findTabsByUri, trackTabOpen, trackTabClose, initializeOpenPaths } from './tabs';
 import { getConfig, initConfig } from './config';
 import { CONFIG_NAMESPACE } from './constants';
 import { SessionRegistry, setRegistry, getRegistry } from './registry';
@@ -92,6 +92,9 @@ export function activate(context: vscode.ExtensionContext) {
 
     const editorChangeListener = vscode.window.onDidChangeActiveTextEditor(async (editor) => {
         if (!editor || isSyncing) { return; }
+
+        trackTabOpen(editor.document.uri.fsPath);
+
         if (!getConfig().autoOpenTerminal) { return; }
         if (!isClaudeFile(editor.document.uri.fsPath)) { return; }
 
@@ -120,10 +123,16 @@ export function activate(context: vscode.ExtensionContext) {
 
     const tabCloseListener = vscode.window.tabGroups.onDidChangeTabs(async (event) => {
         try {
+            for (const tab of event.opened) {
+                if (tab.input instanceof vscode.TabInputText) {
+                    trackTabOpen(tab.input.uri.fsPath);
+                }
+            }
             for (const tab of event.closed) {
                 if (!(tab.input instanceof vscode.TabInputText)) { continue; }
 
                 const filePath = tab.input.uri.fsPath;
+                trackTabClose(filePath);
 
                 if (!isClaudeFile(filePath) || !registry.has(filePath)) {
                     closeTerminalForEditor(filePath);
@@ -257,6 +266,7 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     async function initializeWorkspace() {
+        initializeOpenPaths();
         await closeNonClaudeFiles();
         await openTerminalsForAllClaudeFiles();
         registry.reconnectTaskTerminals();
@@ -269,6 +279,9 @@ export function activate(context: vscode.ExtensionContext) {
             try { await initializeWorkspace(); }
             catch (err) { console.error('Claude Developer: initialization failed:', err); }
         }, 0);
+    } else {
+        // Populate tracked paths even without full workspace init
+        initializeOpenPaths();
     }
 
     startGlobalStateWatcher();

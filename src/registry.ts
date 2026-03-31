@@ -1,10 +1,11 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as os from 'os';
-import { SessionEntry, SessionInfo, HookState, TaskInfo } from './types';
-import { dirToProjectName, getSessionLogPath, isClaudeFile } from './utils';
-import { REGISTRY_PERSISTENCE_KEY } from './constants';
+import { SessionEntry, SessionInfo, HookState, TaskInfo, STATE_DIR } from './types';
+import { getSessionLogPath, safeJsonParse } from './utils';
+import { REGISTRY_PERSISTENCE_KEY, TASK_KEY_PREFIX, TASK_NAME_PREFIX } from './constants';
+import { logError } from './log';
+import { scanForSession } from './session-resolver';
 
 // ── Singleton ───────────────────────────────────────────────────────────────
 
@@ -19,56 +20,6 @@ export function getRegistry(): SessionRegistry {
         throw new Error('SessionRegistry not initialized -- call setRegistry() in activate()');
     }
     return _registry;
-}
-
-// ── Session scanning (moved from terminal.ts) ───────────────────────────────
-
-async function scanForSession(cwd: string, claudeFileName: string): Promise<string | undefined> {
-    const projectDir = dirToProjectName(cwd);
-    const sessionsDir = path.join(os.homedir(), '.claude', 'projects', projectDir);
-
-    try {
-        await fs.promises.access(sessionsDir);
-    } catch {
-        return undefined;
-    }
-
-    const needle = `Session renamed to: \\"${claudeFileName}\\"`;
-    const matches: { sessionId: string; mtime: number }[] = [];
-
-    let files: string[];
-    try {
-        files = await fs.promises.readdir(sessionsDir);
-    } catch {
-        return undefined;
-    }
-
-    for (const file of files) {
-        if (!file.endsWith('.jsonl')) {
-            continue;
-        }
-        const filePath = path.join(sessionsDir, file);
-        try {
-            const content = await fs.promises.readFile(filePath, 'utf-8');
-            if (content.includes(needle)) {
-                const stat = await fs.promises.stat(filePath);
-                matches.push({
-                    sessionId: path.basename(file, '.jsonl'),
-                    mtime: stat.mtimeMs,
-                });
-            }
-        } catch {
-            // skip unreadable files
-        }
-    }
-
-    if (matches.length === 0) {
-        return undefined;
-    }
-
-    // Return the most recently modified session
-    matches.sort((a, b) => b.mtime - a.mtime);
-    return matches[0].sessionId;
 }
 
 // ── SessionRegistry ─────────────────────────────────────────────────────────
@@ -117,7 +68,7 @@ export class SessionRegistry {
 
     /** Register a task terminal (no .claude file). Returns the entry. */
     registerTask(dir: string, skill: string, terminal: vscode.Terminal): SessionEntry {
-        const taskId = `task://${dir}/${Date.now()}-${skill.replace(/^\//, '')}`;
+        const taskId = `${TASK_KEY_PREFIX}${dir}/${Date.now()}-${skill.replace(/^\//, '')}`;
         const displayName = skill.replace(/^\//, '');
         const entry: SessionEntry = {
             filePath: taskId,
@@ -142,7 +93,7 @@ export class SessionRegistry {
 
     /** Check if a key is a task terminal key. */
     static isTaskKey(key: string): boolean {
-        return key.startsWith('task://');
+        return key.startsWith(TASK_KEY_PREFIX);
     }
 
     /** Remove an entry entirely. */
@@ -165,7 +116,7 @@ export class SessionRegistry {
             const fsPath = vscode.Uri.parse(uriString).fsPath;
             return this._entries.get(fsPath);
         } catch {
-            return undefined;
+            return undefined; /* expected: invalid URI string */
         }
     }
 
@@ -264,6 +215,28 @@ export class SessionRegistry {
         // Task terminals don't have a named session to resolve
         if (entry.task) { return undefined; }
 
+        // Fast path: check if state-tracker.py has written session_id to the state file
+        try {
+            const stateFile = path.join(STATE_DIR, `${entry.claudeFile}.json`);
+            const raw = await fs.promises.readFile(stateFile, 'utf-8');
+            const state = safeJsonParse<{ session_id?: string }>(raw);
+            if (state?.session_id) {
+                const logPath = getSessionLogPath(entry.dir, state.session_id);
+                try {
+                    const stat = await fs.promises.stat(logPath);
+                    entry.sessionId = state.session_id;
+                    entry.logPath = logPath;
+                    entry.lastActive = stat.mtime;
+                    await this.persist();
+                    return state.session_id;
+                } catch {
+                    /* expected: JSONL for that session_id doesn't exist yet */
+                }
+            }
+        } catch {
+            /* expected: state file doesn't exist or isn't readable */
+        }
+
         // Check globalState cache
         const persisted = this._globalState.get<Record<string, string>>(REGISTRY_PERSISTENCE_KEY, {});
         const cached = persisted[entry.filePath];
@@ -276,7 +249,7 @@ export class SessionRegistry {
                 entry.lastActive = stat.mtime;
                 return cached;
             } catch {
-                // Cached JSONL no longer exists, fall through to scan
+                /* expected: cached JSONL no longer exists, fall through to scan */
             }
         }
 
@@ -288,7 +261,7 @@ export class SessionRegistry {
             try {
                 entry.lastActive = (await fs.promises.stat(entry.logPath)).mtime;
             } catch {
-                // file might not exist yet
+                /* expected: log file might not exist yet */
             }
             await this.persist();
         }
@@ -336,7 +309,7 @@ export class SessionRegistry {
             try {
                 entry.lastActive = (await fs.promises.stat(entry.logPath)).mtime;
             } catch {
-                // file may have been removed
+                /* expected: log file may have been removed */
             }
         }
     }
@@ -375,11 +348,10 @@ export class SessionRegistry {
 
     /** Reconnect orphaned task terminals after extension reload. */
     reconnectTaskTerminals(): void {
-        const prefix = 'Task: ';
         for (const terminal of vscode.window.terminals) {
-            if (!terminal.name.startsWith(prefix)) { continue; }
+            if (!terminal.name.startsWith(TASK_NAME_PREFIX)) { continue; }
             if (this._terminalIndex.has(terminal)) { continue; }
-            const skill = '/' + terminal.name.slice(prefix.length);
+            const skill = '/' + terminal.name.slice(TASK_NAME_PREFIX.length);
             // Use the terminal's creationOptions.cwd if available, otherwise fallback
             const opts = terminal.creationOptions as { cwd?: string | vscode.Uri };
             const dir = opts?.cwd

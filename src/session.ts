@@ -183,7 +183,8 @@ export async function parseSubagents(logPath: string): Promise<SubagentInfo[]> {
 
     let content: string;
     try {
-        content = await fs.promises.readFile(logPath, 'utf-8');
+        const lines = await readTailChunk(logPath, TAIL_CHUNK_SIZE);
+        content = lines.join('\n');
     } catch {
         return [];
     }
