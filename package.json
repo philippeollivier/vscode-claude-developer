@@ -49,6 +49,11 @@
         "command": "tabTerminal.forkSession",
         "title": "Fork Current Session",
         "category": "Claude Developer"
+      },
+      {
+        "command": "tabTerminal.runTask",
+        "title": "Run Task",
+        "category": "Claude Developer"
       }
     ],
     "keybindings": [
@@ -86,13 +91,19 @@
           "type": "boolean",
           "default": true,
           "description": "Show confirmation dialog when closing a .claude file with a paired terminal"
+        },
+        "tabTerminal.skills": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["/summarize-and-move-to-archive", "/update-worklog"],
+          "description": "Slash commands available in the dashboard right-click menu"
         }
       }
     }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
+    "compile": "tsc -p ./ && cp -r out package.json claude-icon.svg ~/.vscode/extensions/undefined_publisher.claude-developer-0.0.1/",
     "watch": "tsc -watch -p ./",
     "lint": "eslint src --ext ts"
   },

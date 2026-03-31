@@ -1,16 +1,16 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import { SessionInfo, SubagentInfo, DashboardSettings } from './types';
 import { escapeHtml, renderMarkdown, hexToRgba, timeAgo, getForkBase, escapePathForJs, isForkName } from './utils';
 import { getOpenClaudeFiles, findTabsByUri } from './tabs';
 import { getConfig } from './config';
 import { tailSessionMessages, parseSubagents } from './session';
 import { statusLabel, statusColors, setDashboardCallbacks } from './state';
-import { closeTerminalForEditor, forkSession } from './terminal';
+import { closeTerminalForEditor, forkSession, openTaskTerminal, withSyncGuard } from './terminal';
+import { getRegistry } from './registry';
 import { DASHBOARD_REFRESH_INTERVAL_MS, CONFIG_NAMESPACE } from './constants';
-
-// ── Mutable shared state ─────────────────────────────────────────────────────
 
 export let dashboardPanel: vscode.WebviewPanel | undefined;
 export let extensionContext: vscode.ExtensionContext | undefined;
@@ -19,22 +19,16 @@ let dashboardInterval: ReturnType<typeof setInterval> | undefined;
 let canPostMessage = false;
 let panelDisposables: vscode.Disposable[] = [];
 
-// ── Security helpers ────────────────────────────────────────────────────────
-
 function isPathSafe(p: string): boolean {
     const normalized = path.normalize(p);
-    // Reject path traversal
     if (normalized !== p && normalized !== p.replace(/\/$/, '')) { return false; }
-    // Must be absolute
     if (!path.isAbsolute(normalized)) { return false; }
     return true;
 }
 
-// ── Tab-closing helper ──────────────────────────────────────────────────────
-
 async function closeTabByPath(filePath: string): Promise<void> {
+    closeTerminalForEditor(filePath);
     const uri = vscode.Uri.file(filePath).toString();
-    closeTerminalForEditor(uri);
     for (const tab of findTabsByUri(uri)) {
         await vscode.window.tabGroups.close(tab);
     }
@@ -43,8 +37,6 @@ async function closeTabByPath(filePath: string): Promise<void> {
 export function setExtensionContext(ctx: vscode.ExtensionContext): void {
     extensionContext = ctx;
 }
-
-// ── Setting renderers ────────────────────────────────────────────────────────
 
 export function renderToggleSetting(label: string, description: string, settingKey: string, checked: boolean): string {
     return `<div class="setting-row">
@@ -76,8 +68,6 @@ export function renderSelectSetting(label: string, description: string, settingK
                 </div>`;
 }
 
-// ── Card renderer ────────────────────────────────────────────────────────────
-
 export function renderCard(s: SessionInfo, summaries: Map<string, string>, subagents: Map<string, SubagentInfo[]>, groupColor: string = ''): string {
     const tailLines = summaries.get(s.claudeFile) ?? '';
     const agents = subagents.get(s.claudeFile) ?? [];
@@ -105,23 +95,18 @@ export function renderCard(s: SessionInfo, summaries: Map<string, string>, subag
         </div>`;
     }
 
-    const deleteBtn = isFork
-        ? `<button class="card-btn card-btn-delete" onclick="event.stopPropagation(); vscode.postMessage({command:'delete', path:'${escapedPath}'})" title="Delete fork">&#x1F5D1;</button>`
-        : '';
-
     const timeText = s.lastActive ? timeAgo(s.lastActive) : '';
     const labelText = timeText ? `${statusText} · ${timeText}` : statusText;
 
     return `
-            <div class="card" style="${groupColor ? `border-left: 3px solid ${groupColor};` : ''}" onclick="vscode.postMessage({command:'open', path:'${escapedPath}'})" title="Open ${escapeHtml(s.claudeFile)}">
+            <div class="card" data-path="${escapedPath}" data-fork="${isFork ? '1' : ''}" style="${groupColor ? `border-left: 3px solid ${groupColor};` : ''}" onclick="vscode.postMessage({command: event.metaKey ? 'revealTerminal' : 'open', path:'${escapedPath}'})" title="Click to open · ⌘+Click for terminal only">
                 <div class="card-header">
                     <div class="card-title">
-                        <span class="status-label ${cssClass}">${escapeHtml(labelText)}</span>
+                        <span class="status-label ${cssClass}" ${s.hookState?.tool_input_summary ? `title="${escapeHtml(s.hookState.tool_input_summary)}"` : ''}>${escapeHtml(labelText)}</span>
                         <h2>${escapeHtml(s.claudeFile)}</h2>
                     </div>
                     <div class="card-meta">
-                        <button class="card-btn card-btn-fork" onclick="event.stopPropagation(); vscode.postMessage({command:'fork', path:'${escapedPath}'})" title="Fork">&#x2387;</button>
-                        ${deleteBtn}
+                        <button class="card-btn card-btn-menu" onclick="event.stopPropagation(); showCardMenu(event, '${escapedPath}')" title="Actions">&hellip;</button>
                         <button class="card-btn card-btn-close" onclick="event.stopPropagation(); vscode.postMessage({command:'close', path:'${escapedPath}'})" title="Close">&#x2715;</button>
                     </div>
                 </div>
@@ -130,23 +115,33 @@ export function renderCard(s: SessionInfo, summaries: Map<string, string>, subag
             </div>`;
 }
 
-// ── Dashboard HTML ───────────────────────────────────────────────────────────
+export function renderTaskCard(s: SessionInfo, groupColor: string = ''): string {
+    const taskId = s.task!.taskId;
+    const escapedId = escapePathForJs(taskId);
+    const timeText = s.task!.startedAt ? timeAgo(s.task!.startedAt) : '';
+    const labelText = timeText ? `Task · ${timeText}` : 'Task';
 
-// Rotating color palette for group accents (works well on dark themes)
+    return `
+            <div class="card task-card" style="${groupColor ? `border-left: 3px dashed ${groupColor};` : ''}" onclick="vscode.postMessage({command:'revealTaskTerminal', taskId:'${escapedId}'})" title="Click to reveal terminal">
+                <div class="card-header">
+                    <div class="card-title">
+                        <span class="status-label status-task">${escapeHtml(labelText)}</span>
+                        <h2>${escapeHtml(s.task!.skill)}</h2>
+                    </div>
+                    <div class="card-meta">
+                        <button class="card-btn card-btn-close" onclick="event.stopPropagation(); vscode.postMessage({command:'closeTask', taskId:'${escapedId}'})" title="Close">&#x2715;</button>
+                    </div>
+                </div>
+            </div>`;
+}
+
 const groupColors = [
-    '#7eb4f0', // soft blue
-    '#b89aed', // lavender
-    '#6ec8a0', // mint green
-    '#e0a36a', // warm amber
-    '#e07a9a', // rose
-    '#6ac4c4', // teal
-    '#c4a95a', // gold
-    '#a0a0d0', // periwinkle
+    '#7eb4f0', '#b89aed', '#6ec8a0', '#e0a36a',
+    '#e07a9a', '#6ac4c4', '#c4a95a', '#a0a0d0',
 ];
 
-/** Sort sessions so forks appear immediately after their parent */
+/** Sort sessions so forks appear immediately after their parent. */
 function sortWithForks(items: SessionInfo[]): SessionInfo[] {
-    // Group by fork base name
     const byBase = new Map<string, SessionInfo[]>();
     for (const s of items) {
         const base = getForkBase(s.claudeFile);
@@ -154,7 +149,6 @@ function sortWithForks(items: SessionInfo[]): SessionInfo[] {
         list.push(s);
         byBase.set(base, list);
     }
-    // Within each group, parent first (no ~N), then forks sorted by number
     const sorted: SessionInfo[] = [];
     for (const group of byBase.values()) {
         group.sort((a, b) => {
@@ -177,25 +171,36 @@ export function getCardsHtml(sessions: SessionInfo[], summaries: Map<string, str
         groups.set(s.dir, list);
     }
 
+    const sortedDirs = [...groups.keys()].sort((a, b) =>
+        path.basename(a).toLowerCase().localeCompare(path.basename(b).toLowerCase())
+    );
+
     let body = '';
     let colorIndex = 0;
-    for (const [dir, items] of groups) {
+    for (const dir of sortedDirs) {
+        const items = groups.get(dir)!;
         const dirName = path.basename(dir);
         const color = groupColors[colorIndex % groupColors.length];
         colorIndex++;
         const sorted = sortWithForks(items);
         const escapedDir = escapePathForJs(dir);
+        const regularItems = sorted.filter(c => !c.task);
+        const taskItems = sorted.filter(c => c.task);
         body += `<div class="group">
             <div class="group-header-row">
                 <h2 class="group-header" style="color: ${color}; border-bottom-color: ${color};">${escapeHtml(dirName)}</h2>
-                <button class="add-btn" style="color: ${color};" onclick="event.stopPropagation(); vscode.postMessage({command:'create', dir:'${escapedDir}'})" title="New .claude file">+</button>
+                <div class="group-actions">
+                    <button class="add-btn add-btn-task" style="color: ${color};" onclick="event.stopPropagation(); showTaskPicker(event, '${escapedDir}')" title="Run task"><svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><polygon points="1,0 1,12 11,6"/></svg></button>
+                    <button class="add-btn" style="color: ${color};" onclick="event.stopPropagation(); vscode.postMessage({command:'create', dir:'${escapedDir}'})" title="New .claude file">+</button>
+                </div>
             </div>
-            ${sorted.map(c => {
+            ${regularItems.map(c => {
                 const isFork = isForkName(c.claudeFile);
                 return isFork
                     ? `<div class="fork-child">${renderCard(c, summaries, subagents, color)}</div>`
                     : renderCard(c, summaries, subagents, color);
             }).join('')}
+            ${taskItems.map(c => renderTaskCard(c, color)).join('')}
         </div>`;
     }
 
@@ -214,7 +219,10 @@ export function getDashboardHtml(sessions: SessionInfo[], summaries: Map<string,
         .group { margin-bottom: 28px; }
         .group-header-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; padding-bottom: 6px; border-bottom: 1px solid var(--vscode-panel-border); }
         .group-header { font-size: 12px; font-weight: 600; color: var(--vscode-descriptionForeground); text-transform: uppercase; letter-spacing: 0.5px; margin: 0; padding: 0; border: none; }
+        .group-actions { display: flex; align-items: center; gap: 4px; }
+        .add-btn-task { display: inline-flex; align-items: center; justify-content: center; }
         .add-btn { background: none; border: none; font-size: 18px; font-weight: 600; cursor: pointer; padding: 0 4px; border-radius: 4px; line-height: 1; opacity: 0.6; transition: opacity 0.15s, background 0.15s; }
+        .status-task { background: rgba(110, 200, 160, 0.15); color: #6ec8a0; }
         .add-btn:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground); }
         .card { background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 14px 16px; margin-bottom: 6px; cursor: pointer; transition: border-color 0.15s, background 0.15s; }
         .card:hover { border-color: var(--vscode-focusBorder); background: var(--vscode-list-hoverBackground); }
@@ -227,6 +235,7 @@ export function getDashboardHtml(sessions: SessionInfo[], summaries: Map<string,
         .card-btn { background: none; border: none; color: var(--vscode-descriptionForeground); cursor: pointer; font-size: 13px; padding: 2px 4px; border-radius: 4px; opacity: 0; transition: opacity 0.15s; }
         .card:hover .card-btn { opacity: 1; }
         .card-btn:hover { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); }
+        .card-btn-menu { font-size: 16px; font-weight: 700; letter-spacing: 1px; }
         .card-btn-fork:hover { color: #7eb4f0; }
         .card-btn-delete:hover { color: #e5534b; }
         .card-btn-close:hover { color: #e5534b; }
@@ -272,6 +281,13 @@ export function getDashboardHtml(sessions: SessionInfo[], summaries: Map<string,
         .hotkeys { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; }
         .hotkey-key { font-family: var(--vscode-editor-font-family); font-size: 11px; background: var(--vscode-textCodeBlock-background, rgba(255,255,255,0.06)); padding: 2px 6px; border-radius: 3px; text-align: right; white-space: nowrap; }
         .hotkey-desc { font-size: 12px; color: var(--vscode-descriptionForeground); }
+        .context-menu { position: fixed; z-index: 1000; background: var(--vscode-menu-background, var(--vscode-editor-background)); border: 1px solid var(--vscode-menu-border, var(--vscode-panel-border)); border-radius: 6px; padding: 4px 0; min-width: 180px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+        .context-menu-item { padding: 6px 14px; font-size: 12px; cursor: pointer; color: var(--vscode-menu-foreground, var(--vscode-foreground)); display: flex; align-items: center; gap: 8px; }
+        .context-menu-item:hover { background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground)); color: var(--vscode-menu-selectionForeground, var(--vscode-foreground)); }
+        .context-menu-item .skill-slash { opacity: 0.5; }
+        .context-menu-item-danger { color: #e5534b; }
+        .context-menu-item-danger:hover { background: rgba(229,83,75,0.15); color: #e5534b; }
+        .context-menu-separator { height: 1px; background: var(--vscode-menu-separatorBackground, var(--vscode-panel-border)); margin: 4px 0; }
     </style>
 </head>
 <body>
@@ -303,6 +319,158 @@ export function getDashboardHtml(sessions: SessionInfo[], summaries: Map<string,
     </div>
     <script>
         const vscode = acquireVsCodeApi();
+        const skills = ${JSON.stringify(settings.skills)};
+
+        let activeMenu = null;
+
+        function showCardMenu(e, cardPath) {
+            e.preventDefault();
+            e.stopPropagation();
+            dismissCardMenu();
+
+            const menu = document.createElement('div');
+            menu.className = 'context-menu';
+
+            const card = e.target.closest('.card') || document.querySelector('.card[data-path="' + cardPath + '"]');
+            const isFork = card && card.dataset.fork === '1';
+
+            // Send message
+            const sendItem = document.createElement('div');
+            sendItem.className = 'context-menu-item';
+            sendItem.textContent = 'Send message\u2026';
+            sendItem.addEventListener('click', (ev) => {
+                ev.stopPropagation();
+                dismissCardMenu();
+                vscode.postMessage({ command: 'sendMessage', path: cardPath });
+            });
+            menu.appendChild(sendItem);
+
+            // Fork
+            const forkItem = document.createElement('div');
+            forkItem.className = 'context-menu-item';
+            forkItem.textContent = 'Fork session';
+            forkItem.addEventListener('click', (ev) => {
+                ev.stopPropagation();
+                dismissCardMenu();
+                vscode.postMessage({ command: 'fork', path: cardPath });
+            });
+            menu.appendChild(forkItem);
+
+            // Delete (forks only)
+            if (isFork) {
+                const deleteItem = document.createElement('div');
+                deleteItem.className = 'context-menu-item context-menu-item-danger';
+                deleteItem.textContent = 'Delete fork';
+                deleteItem.addEventListener('click', (ev) => {
+                    ev.stopPropagation();
+                    dismissCardMenu();
+                    vscode.postMessage({ command: 'delete', path: cardPath });
+                });
+                menu.appendChild(deleteItem);
+            }
+
+            // Skills section
+            if (skills.length > 0) {
+                const sep = document.createElement('div');
+                sep.className = 'context-menu-separator';
+                menu.appendChild(sep);
+
+                skills.forEach(skill => {
+                    const item = document.createElement('div');
+                    item.className = 'context-menu-item';
+                    item.innerHTML = '<span class="skill-slash">/</span>' + skill.replace(/^\\//, '');
+                    item.addEventListener('click', (ev) => {
+                        ev.stopPropagation();
+                        vscode.postMessage({ command: 'sendSkill', path: cardPath, skill: skill });
+                        dismissCardMenu();
+                    });
+                    menu.appendChild(item);
+                });
+            }
+
+            document.body.appendChild(menu);
+            activeMenu = menu;
+
+            // Position: use cursor for right-click, button for click
+            menu.style.left = '0px';
+            menu.style.top = '0px';
+            const menuRect = menu.getBoundingClientRect();
+            let x, y;
+            if (e.type === 'contextmenu') {
+                x = e.clientX;
+                y = e.clientY;
+            } else {
+                const btnRect = e.currentTarget.getBoundingClientRect();
+                x = btnRect.right - menuRect.width;
+                y = btnRect.bottom + 4;
+            }
+            if (x + menuRect.width > window.innerWidth) x = window.innerWidth - menuRect.width - 4;
+            if (y + menuRect.height > window.innerHeight) y = y - menuRect.height - 4;
+            if (x < 4) x = 4;
+            if (y < 4) y = 4;
+            menu.style.left = x + 'px';
+            menu.style.top = y + 'px';
+        }
+
+        function dismissCardMenu() {
+            if (activeMenu) {
+                activeMenu.remove();
+                activeMenu = null;
+            }
+        }
+
+        document.addEventListener('click', dismissCardMenu);
+
+        function showTaskPicker(e, dir) {
+            e.preventDefault();
+            e.stopPropagation();
+            dismissCardMenu();
+
+            const menu = document.createElement('div');
+            menu.className = 'context-menu';
+
+            skills.forEach(skill => {
+                const item = document.createElement('div');
+                item.className = 'context-menu-item';
+                item.innerHTML = '<span class="skill-slash">/</span>' + skill.replace(/^\\//, '');
+                item.addEventListener('click', (ev) => {
+                    ev.stopPropagation();
+                    dismissCardMenu();
+                    vscode.postMessage({ command: 'runTask', dir: dir, skill: skill });
+                });
+                menu.appendChild(item);
+            });
+
+            const sep = document.createElement('div');
+            sep.className = 'context-menu-separator';
+            menu.appendChild(sep);
+            const addItem = document.createElement('div');
+            addItem.className = 'context-menu-item';
+            addItem.textContent = 'Add command\u2026';
+            addItem.addEventListener('click', (ev) => {
+                ev.stopPropagation();
+                dismissCardMenu();
+                vscode.postMessage({ command: 'addTaskCommand', dir: dir });
+            });
+            menu.appendChild(addItem);
+
+            document.body.appendChild(menu);
+            activeMenu = menu;
+
+            const btnRect = e.currentTarget.getBoundingClientRect();
+            menu.style.left = '0px';
+            menu.style.top = '0px';
+            const menuRect = menu.getBoundingClientRect();
+            let x = btnRect.right - menuRect.width;
+            let y = btnRect.bottom + 4;
+            if (x + menuRect.width > window.innerWidth) x = window.innerWidth - menuRect.width - 4;
+            if (y + menuRect.height > window.innerHeight) y = y - menuRect.height - 4;
+            if (x < 4) x = 4;
+            if (y < 4) y = 4;
+            menu.style.left = x + 'px';
+            menu.style.top = y + 'px';
+        }
+
         function toggleSettings() {
             const body = document.getElementById('settingsBody');
             const arrow = document.getElementById('settingsArrow');
@@ -312,12 +480,11 @@ export function getDashboardHtml(sessions: SessionInfo[], summaries: Map<string,
             state.settingsOpen = body.classList.contains('open');
             vscode.setState(state);
         }
-        // Handle content updates with scroll anchoring
+
         window.addEventListener('message', event => {
             const msg = event.data;
             if (msg.command === 'updateContent') {
                 const container = document.getElementById('content');
-                // Find the first card visible in the viewport as our anchor
                 const cards = container.querySelectorAll('.card');
                 let anchorName = null;
                 let anchorOffset = 0;
@@ -331,7 +498,6 @@ export function getDashboardHtml(sessions: SessionInfo[], summaries: Map<string,
                     }
                 }
                 container.innerHTML = msg.html;
-                // Scroll so the same card stays at the same viewport position
                 if (anchorName) {
                     const newH2s = container.querySelectorAll('.card h2');
                     for (const h2 of newH2s) {
@@ -344,7 +510,7 @@ export function getDashboardHtml(sessions: SessionInfo[], summaries: Map<string,
                 }
             }
         });
-        // Restore state after refresh
+
         (function() {
             const state = vscode.getState() || {};
             if (state.settingsOpen) {
@@ -354,7 +520,6 @@ export function getDashboardHtml(sessions: SessionInfo[], summaries: Map<string,
             if (state.scrollTop) {
                 document.documentElement.scrollTop = state.scrollTop;
             }
-            // Persist scroll position
             window.addEventListener('scroll', () => {
                 const s = vscode.getState() || {};
                 s.scrollTop = document.documentElement.scrollTop;
@@ -365,8 +530,6 @@ export function getDashboardHtml(sessions: SessionInfo[], summaries: Map<string,
 </body>
 </html>`;
 }
-
-// ── Dashboard lifecycle ──────────────────────────────────────────────────────
 
 export async function refreshDashboard(): Promise<void> {
     if (!dashboardPanel) { return; }
@@ -385,18 +548,16 @@ export async function refreshDashboard(): Promise<void> {
                 subagentMap.set(s.claudeFile, agents);
             }
         } catch {
-            // skip
+            // skip unreadable logs
         }
     }
 
     if (canPostMessage) {
-        // Incremental update: only swap the cards content, preserving scroll
         dashboardPanel.webview.postMessage({
             command: 'updateContent',
             html: getCardsHtml(sessions, summaries, subagentMap),
         });
     } else {
-        // Full render: first load or after panel was hidden/restored
         dashboardPanel.webview.html = getDashboardHtml(sessions, summaries, getConfig(), subagentMap);
         canPostMessage = true;
     }
@@ -404,8 +565,6 @@ export async function refreshDashboard(): Promise<void> {
 
 export function startDashboardAutoRefresh(): void {
     stopDashboardAutoRefresh();
-
-    // Interval refresh
     dashboardInterval = setInterval(() => {
         if (dashboardPanel?.visible) { refreshDashboard(); }
     }, DASHBOARD_REFRESH_INTERVAL_MS);
@@ -437,31 +596,49 @@ export async function openDashboard(): Promise<void> {
         }));
         panelDisposables.push(dashboardPanel.onDidChangeViewState(() => {
             if (dashboardPanel?.visible) {
-                canPostMessage = false; // JS context lost when hidden; need full render
+                canPostMessage = false;
                 refreshDashboard();
             }
         }));
         panelDisposables.push(dashboardPanel.webview.onDidReceiveMessage(async (msg) => {
             if (msg.command === 'refresh') { refreshDashboard(); }
+
             if (msg.command === 'open' && msg.path) {
                 if (!isPathSafe(msg.path as string)) { return; }
-                vscode.window.showTextDocument(vscode.Uri.file(msg.path));
+                const uri = vscode.Uri.file(msg.path as string);
+                const tabs = findTabsByUri(uri.toString());
+                const viewColumn = tabs.length > 0 ? tabs[0].group.viewColumn : vscode.ViewColumn.One;
+                vscode.window.showTextDocument(uri, { viewColumn, preserveFocus: false });
             }
+
+            if (msg.command === 'revealTerminal' && msg.path) {
+                if (!isPathSafe(msg.path as string)) { return; }
+                const entry = getRegistry().get(msg.path as string);
+                if (entry?.terminal) {
+                    withSyncGuard(() => entry.terminal!.show(false));
+                } else {
+                    vscode.window.showWarningMessage(`No terminal found for ${path.basename(msg.path as string, '.claude')}`);
+                }
+            }
+
             if (msg.command === 'setting' && msg.key) {
                 const config = vscode.workspace.getConfiguration(CONFIG_NAMESPACE);
                 const settingKey = (msg.key as string).replace(`${CONFIG_NAMESPACE}.`, '');
                 await config.update(settingKey, msg.value, vscode.ConfigurationTarget.Global);
             }
+
             if (msg.command === 'fork' && msg.path && extensionContext) {
                 if (!isPathSafe(msg.path as string)) { return; }
                 await forkSession(vscode.Uri.file(msg.path).toString(), extensionContext);
                 refreshDashboard();
             }
+
             if (msg.command === 'close' && msg.path) {
                 if (!isPathSafe(msg.path as string)) { return; }
                 await closeTabByPath(msg.path as string);
                 refreshDashboard();
             }
+
             if (msg.command === 'create' && msg.dir) {
                 if (!isPathSafe(msg.dir as string)) { return; }
                 const name = await vscode.window.showInputBox({
@@ -490,11 +667,100 @@ export async function openDashboard(): Promise<void> {
                     refreshDashboard();
                 }
             }
+
+            if (msg.command === 'sendMessage' && msg.path) {
+                if (!isPathSafe(msg.path as string)) { return; }
+                const entry = getRegistry().get(msg.path as string);
+                if (entry?.terminal) {
+                    const text = await vscode.window.showInputBox({
+                        prompt: `Send to ${path.basename(msg.path as string, '.claude')}`,
+                        placeHolder: 'Type a message...',
+                    });
+                    if (text) {
+                        entry.terminal.sendText(text);
+                    }
+                } else {
+                    vscode.window.showWarningMessage(`No terminal found for ${path.basename(msg.path as string, '.claude')}`);
+                }
+            }
+
+            if (msg.command === 'sendSkill' && msg.path && msg.skill) {
+                if (!isPathSafe(msg.path as string)) { return; }
+                const entry = getRegistry().get(msg.path as string);
+                if (entry?.terminal) {
+                    entry.terminal.sendText(msg.skill as string);
+                } else {
+                    vscode.window.showWarningMessage(`No terminal found for ${path.basename(msg.path as string, '.claude')}`);
+                }
+            }
+
             if (msg.command === 'delete' && msg.path) {
                 if (!isPathSafe(msg.path as string)) { return; }
                 const filePath = msg.path as string;
                 await closeTabByPath(filePath);
                 try { fs.unlinkSync(filePath); } catch {}
+                refreshDashboard();
+            }
+
+            if (msg.command === 'runTask' && msg.dir && msg.skill) {
+                if (!isPathSafe(msg.dir as string)) { return; }
+                const skill = msg.skill as string;
+                const details = await vscode.window.showInputBox({
+                    prompt: `${skill} — enter details (or leave empty)`,
+                    placeHolder: 'e.g. issue number, description...',
+                });
+                if (details === undefined) { return; } // cancelled
+                const fullCommand = details ? `${skill} ${details}` : skill;
+                if (extensionContext) {
+                    await openTaskTerminal(msg.dir as string, fullCommand, extensionContext);
+                    refreshDashboard();
+                }
+            }
+
+            if (msg.command === 'addTaskCommand' && msg.dir) {
+                if (!isPathSafe(msg.dir as string)) { return; }
+                // Discover all commands from ~/.claude/commands/ and local .claude/commands/
+                const commands: string[] = [];
+                const globalDir = path.join(os.homedir(), '.claude', 'commands');
+                const localDir = path.join(msg.dir as string, '.claude', 'commands');
+                for (const dir of [globalDir, localDir]) {
+                    try {
+                        const files = fs.readdirSync(dir);
+                        for (const f of files) {
+                            if (f.endsWith('.md')) {
+                                const name = '/' + f.replace(/\.md$/, '');
+                                if (!commands.includes(name)) { commands.push(name); }
+                            }
+                        }
+                    } catch { /* dir doesn't exist */ }
+                }
+                const picked = await vscode.window.showQuickPick(commands, {
+                    placeHolder: 'Select a command to add to the task menu',
+                });
+                if (picked) {
+                    const config = vscode.workspace.getConfiguration(CONFIG_NAMESPACE);
+                    const current = config.get<string[]>('skills', []);
+                    if (!current.includes(picked)) {
+                        await config.update('skills', [...current, picked], vscode.ConfigurationTarget.Global);
+                    }
+                    canPostMessage = false;
+                    refreshDashboard();
+                }
+            }
+
+            if (msg.command === 'revealTaskTerminal' && msg.taskId) {
+                const entry = getRegistry().get(msg.taskId as string);
+                if (entry?.terminal) {
+                    withSyncGuard(() => entry.terminal!.show(false));
+                }
+            }
+
+            if (msg.command === 'closeTask' && msg.taskId) {
+                const entry = getRegistry().get(msg.taskId as string);
+                if (entry?.terminal) {
+                    entry.terminal.dispose();
+                }
+                getRegistry().unregister(msg.taskId as string);
                 refreshDashboard();
             }
         }));
@@ -503,8 +769,15 @@ export async function openDashboard(): Promise<void> {
     refreshDashboard();
 }
 
-// Register callbacks with state module (called at import time to wire up the dependency)
 setDashboardCallbacks(
     () => refreshDashboard(),
     () => dashboardPanel?.visible ?? false,
+    () => openDashboard(),
+    (claudeFile: string) => {
+        const registry = getRegistry();
+        const entry = registry.getByClaudeFile(claudeFile);
+        if (entry) {
+            vscode.window.showTextDocument(vscode.Uri.file(entry.filePath));
+        }
+    },
 );

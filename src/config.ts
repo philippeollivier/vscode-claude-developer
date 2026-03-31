@@ -6,6 +6,7 @@ export interface ExtensionConfig {
     terminalLocation: string;
     autoSetupOnStart: boolean;
     confirmCloseClaudeFile: boolean;
+    skills: string[];
 }
 
 let cachedConfig: ExtensionConfig | undefined;
@@ -17,6 +18,7 @@ function readConfig(): ExtensionConfig {
         terminalLocation: cfg.get<string>('terminalLocation', 'right'),
         autoSetupOnStart: cfg.get<boolean>('autoSetupOnStart', true),
         confirmCloseClaudeFile: cfg.get<boolean>('confirmCloseClaudeFile', true),
+        skills: cfg.get<string[]>('skills', ['/summarize-and-move-to-archive', '/update-worklog']),
     };
 }
 

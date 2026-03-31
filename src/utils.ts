@@ -10,20 +10,14 @@ export function escapeHtml(text: string): string {
     return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-/** Lightweight markdown -> HTML for tail lines (inline elements + headers/lists) */
+/** Lightweight markdown -> HTML for tail lines (inline elements + headers/lists). */
 export function renderMarkdown(escaped: string): string {
     return escaped
-        // inline code
         .replace(/`([^`]+)`/g, '<code>$1</code>')
-        // bold
         .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-        // italic
         .replace(/\*(.+?)\*/g, '<em>$1</em>')
-        // headers (strip to bold)
         .replace(/^#{1,6}\s+(.+)/, '<strong>$1</strong>')
-        // unordered list bullets
         .replace(/^[-*]\s+/, '&bull; ')
-        // numbered list
         .replace(/^\d+\.\s+/, match => match);
 }
 
@@ -45,9 +39,7 @@ export function timeAgo(date: Date): string {
     return `${days}d ago`;
 }
 
-// ── Fork naming utilities ───────────────────────────────────────────────────
-
-/** Parse "hugh~2" → { base: "hugh", forkNum: 2 }, "hugh" → { base: "hugh", forkNum: undefined } */
+/** Parse "hugh~2" -> { base: "hugh", forkNum: 2 }, "hugh" -> { base: "hugh", forkNum: undefined }. */
 export function parseForkName(claudeFile: string): { base: string; forkNum: number | undefined } {
     const match = claudeFile.match(/^(.+)~(\d+)$/);
     if (match) {
@@ -56,19 +48,17 @@ export function parseForkName(claudeFile: string): { base: string; forkNum: numb
     return { base: claudeFile, forkNum: undefined };
 }
 
-/** Get the base (parent) name, stripping any ~N suffix */
 export function getForkBase(claudeFile: string): string {
     return parseForkName(claudeFile).base;
 }
 
-/** Find the next available fork name (e.g., "hugh~2", "hugh~3") by scanning the directory */
+/** Find the next available fork name by scanning the directory for existing ~N suffixes. */
 export function nextForkName(dir: string, baseName: string): string {
-    const fs = require('fs');
-    let maxNum = 1; // original is implicitly fork 1
+    let maxNum = 1;
     try {
         for (const file of fs.readdirSync(dir)) {
             if (!file.endsWith('.claude')) { continue; }
-            const name = file.slice(0, -7); // strip .claude
+            const name = file.slice(0, -7);
             const { base, forkNum } = parseForkName(name);
             if (base === baseName && forkNum !== undefined && forkNum > maxNum) {
                 maxNum = forkNum;
@@ -80,30 +70,23 @@ export function nextForkName(dir: string, baseName: string): string {
     return `${baseName}~${maxNum + 1}`;
 }
 
-// ── Shared utility functions ────────────────────────────────────────────────
-
-/** Convert a directory path to a project name suitable for the Claude session directory */
 export function dirToProjectName(dir: string): string {
     return dir.replace(/[/ ]/g, '-');
 }
 
-/** Build the full path to a session JSONL log file */
 export function getSessionLogPath(dir: string, sessionId: string): string {
     const projectDir = dirToProjectName(dir);
     return path.join(os.homedir(), '.claude', 'projects', projectDir, sessionId + '.jsonl');
 }
 
-/** Escape a file path for safe embedding in JS string literals inside HTML */
 export function escapePathForJs(filePath: string): string {
     return escapeHtml(filePath.replace(/\\/g, '\\\\').replace(/'/g, "\\'"));
 }
 
-/** Check whether a claude file name represents a fork (contains '~') */
 export function isForkName(name: string): boolean {
     return name.includes('~');
 }
 
-/** Safely parse a JSON string, returning null on failure */
 export function safeJsonParse<T>(str: string): T | null {
     try {
         return JSON.parse(str) as T;
@@ -112,7 +95,6 @@ export function safeJsonParse<T>(str: string): T | null {
     }
 }
 
-/** Ensure a directory exists, creating it recursively if needed */
 export function ensureDirectoryExists(dirPath: string): void {
     if (!fs.existsSync(dirPath)) {
         fs.mkdirSync(dirPath, { recursive: true });
