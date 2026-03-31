@@ -5,6 +5,25 @@ import { isClaudeFile } from './utils';
 import { readHookState } from './state';
 import { getRegistry } from './registry';
 
+// ── Incremental tab tracking ────────────────────────────────────────────────
+
+const openClaudePaths = new Set<string>();
+
+export function trackTabOpen(fsPath: string): void {
+    if (isClaudeFile(fsPath)) { openClaudePaths.add(fsPath); }
+}
+
+export function trackTabClose(fsPath: string): void {
+    openClaudePaths.delete(fsPath);
+}
+
+export function initializeOpenPaths(): void {
+    openClaudePaths.clear();
+    forEachClaudeTab((_uri, fsPath) => { openClaudePaths.add(fsPath); });
+}
+
+// ── Tab utilities ───────────────────────────────────────────────────────────
+
 export function findTabsByUri(targetUri: string): vscode.Tab[] {
     const found: vscode.Tab[] = [];
     for (const group of vscode.window.tabGroups.all) {
@@ -33,9 +52,7 @@ export function forEachClaudeTab(callback: (uri: vscode.Uri, fsPath: string) => 
 
 export async function getOpenClaudeFiles(): Promise<SessionInfo[]> {
     const registry = getRegistry();
-    const paths: string[] = [];
-
-    forEachClaudeTab((_uri, fsPath) => { paths.push(fsPath); });
+    const paths: string[] = [...openClaudePaths];
 
     await Promise.all(paths.map(async (fsPath) => {
         if (!registry.has(fsPath)) {

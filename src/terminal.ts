@@ -3,8 +3,9 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { isClaudeFile, getForkBase, nextForkName } from './utils';
 import { getConfig } from './config';
-import { SYNC_GUARD_DELAY_MS } from './constants';
+import { SYNC_GUARD_DELAY_MS, TASK_NAME_PREFIX, CLAUDE_ICON_FILE } from './constants';
 import { getRegistry } from './registry';
+import { logError } from './log';
 
 // ── Sync guard (unchanged) ──────────────────────────────────────────────────
 
@@ -65,7 +66,7 @@ export async function openTerminalForEditor(
     const displayName = isClaudeDoc ? path.basename(filePath, '.claude') : fileName;
 
     const iconPath = isClaudeDoc
-        ? vscode.Uri.joinPath(context.extensionUri, 'claude-icon.svg')
+        ? vscode.Uri.joinPath(context.extensionUri, CLAUDE_ICON_FILE)
         : undefined;
 
     const env = isClaudeDoc
@@ -149,12 +150,12 @@ export async function openTaskTerminal(
 ): Promise<void> {
     const registry = getRegistry();
     const config = getConfig();
-    const displayName = `Task: ${skill.replace(/^\//, '')}`;
+    const displayName = `${TASK_NAME_PREFIX}${skill.replace(/^\//, '')}`;
 
     const terminal = vscode.window.createTerminal({
         name: displayName,
         cwd: dir,
-        iconPath: vscode.Uri.joinPath(context.extensionUri, 'claude-icon.svg'),
+        iconPath: vscode.Uri.joinPath(context.extensionUri, CLAUDE_ICON_FILE),
         location: config.terminalLocation === 'right'
             ? vscode.TerminalLocation.Editor
             : vscode.TerminalLocation.Panel,
