@@ -1,28 +1,18 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as os from 'os';
-import { isClaudeFile, getForkBase, nextForkName, dirToProjectName } from './utils';
+import { isClaudeFile, getForkBase, nextForkName } from './utils';
 import { getConfig } from './config';
 import { SYNC_GUARD_DELAY_MS } from './constants';
+import { getRegistry } from './registry';
 
-// ── Mutable shared state ─────────────────────────────────────────────────────
-
-/** Map to track which terminal belongs to which editor (by document URI) */
-export const editorTerminalMap = new Map<string, vscode.Terminal>();
-
-/** Track terminals we created so we can identify them */
-export const managedTerminals = new Set<vscode.Terminal>();
+// ── Sync guard (unchanged) ──────────────────────────────────────────────────
 
 /** Guard to prevent infinite loops between editor<->terminal sync */
 export let isSyncing = false;
 
 /** Depth counter for nested/overlapping withSyncGuard calls */
 let syncDepth = 0;
-
-export function setIsSyncing(value: boolean): void {
-    isSyncing = value;
-}
 
 /** Execute fn while holding the sync guard, releasing after a delay */
 export function withSyncGuard(fn: () => void | PromiseLike<unknown>, delay: number = SYNC_GUARD_DELAY_MS): void {
@@ -58,27 +48,22 @@ export async function openTerminalForEditor(
     context: vscode.ExtensionContext,
     forkFromSessionId?: string,
 ): Promise<void> {
-    const uri = editor.document.uri.toString();
+    const filePath = editor.document.uri.fsPath;
+    const registry = getRegistry();
 
-    // Check if terminal already exists for this editor
-    if (editorTerminalMap.has(uri)) {
-        const existingTerminal = editorTerminalMap.get(uri);
-        if (existingTerminal) {
-            existingTerminal.show(true);
-            return;
-        }
+    // Check if terminal already exists and is alive
+    const existing = registry.get(filePath);
+    if (existing?.terminal && registry.validateTerminal(filePath)) {
+        existing.terminal.show(true);
+        return;
     }
 
     const location = getConfig().terminalLocation;
-
-    // Get the directory of the current file
-    const filePath = editor.document.uri.fsPath;
     const fileDir = path.dirname(filePath);
     const fileName = path.basename(filePath);
     const isClaudeDoc = isClaudeFile(filePath);
     const displayName = isClaudeDoc ? path.basename(filePath, '.claude') : fileName;
 
-    // Use Claude icon for .claude files
     const iconPath = isClaudeDoc
         ? vscode.Uri.joinPath(context.extensionUri, 'claude-icon.svg')
         : undefined;
@@ -87,7 +72,6 @@ export async function openTerminalForEditor(
         ? { CLAUDE_FILE: path.basename(filePath, '.claude') }
         : undefined;
 
-    // Create a new terminal with a name based on the file
     const terminal = vscode.window.createTerminal({
         name: displayName,
         cwd: fileDir,
@@ -98,16 +82,11 @@ export async function openTerminalForEditor(
             : vscode.TerminalLocation.Panel
     });
 
-    // Track this terminal
-    editorTerminalMap.set(uri, terminal);
-    managedTerminals.add(terminal);
+    // Register in the session registry
+    await registry.register(filePath, terminal);
 
-    // If using editor location (right side), we need to move it to a split
     if (location === 'right') {
-        // Show the terminal which will create it in the editor area
         terminal.show(true);
-
-        // Move terminal to the side
         vscode.commands.executeCommand('workbench.action.moveEditorToRightGroup');
     } else {
         terminal.show(true);
@@ -116,10 +95,9 @@ export async function openTerminalForEditor(
     // Auto-start claude for .claude files
     if (isClaudeDoc) {
         if (forkFromSessionId) {
-            // Fork: create new session branching from the parent, then rename
             terminal.sendText(`{ echo '/rename "${displayName}"'; exec < /dev/tty; } | claude --resume "${forkFromSessionId}" --fork-session`);
         } else {
-            const sessionId = await findExistingSession(fileDir, displayName);
+            const sessionId = await registry.resolveSessionId(filePath);
             if (sessionId) {
                 terminal.sendText(`claude --resume "${sessionId}"`);
             } else {
@@ -138,19 +116,17 @@ export async function forkSession(
     const dir = path.dirname(sourcePath);
     const sourceName = path.basename(sourcePath, '.claude');
     const baseName = getForkBase(sourceName);
+    const registry = getRegistry();
 
-    // Find the parent session ID
-    const sessionId = await findExistingSession(dir, sourceName);
+    const sessionId = await registry.resolveSessionId(sourcePath);
     if (!sessionId) {
         vscode.window.showWarningMessage(`No Claude session found for ${sourceName}`);
         return;
     }
 
-    // Determine the fork name
     const forkName = nextForkName(dir, baseName);
     const forkPath = path.join(dir, `${forkName}.claude`);
 
-    // Create the fork .claude file
     try {
         await fs.promises.writeFile(forkPath, `# Fork of ${sourceName}\n`);
     } catch (err) {
@@ -158,7 +134,6 @@ export async function forkSession(
         return;
     }
 
-    // Suppress the auto-terminal listener so it doesn't race us with a non-forked session
     withSyncGuard(async () => {
         const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(forkPath));
         const editor = await vscode.window.showTextDocument(doc);
@@ -166,72 +141,12 @@ export async function forkSession(
     }, 200);
 }
 
-/**
- * Remove a terminal from both tracking collections (editorTerminalMap and managedTerminals).
- * Does NOT dispose the terminal -- callers that need disposal should call terminal.dispose() first.
- */
-export function cleanupTerminal(terminal: vscode.Terminal): void {
-    managedTerminals.delete(terminal);
-    for (const [uri, t] of editorTerminalMap.entries()) {
-        if (t === terminal) {
-            editorTerminalMap.delete(uri);
-            break;
-        }
+export function closeTerminalForEditor(filePath: string): void {
+    const registry = getRegistry();
+    // Support both fsPath and URI string for backward compat
+    const entry = registry.get(filePath) ?? registry.getByUri(filePath);
+    if (entry?.terminal) {
+        entry.terminal.dispose();
+        registry.clearTerminal(entry.filePath);
     }
-}
-
-export function closeTerminalForEditor(uri: string): void {
-    const terminal = editorTerminalMap.get(uri);
-    if (terminal) {
-        terminal.dispose();
-        cleanupTerminal(terminal);
-    }
-}
-
-export async function findExistingSession(cwd: string, claudeFileName: string): Promise<string | undefined> {
-    const projectDir = dirToProjectName(cwd);
-    const sessionsDir = path.join(os.homedir(), '.claude', 'projects', projectDir);
-
-    try {
-        await fs.promises.access(sessionsDir);
-    } catch {
-        return undefined;
-    }
-
-    const needle = `Session renamed to: \\"${claudeFileName}\\"`;
-    const matches: { sessionId: string; mtime: number }[] = [];
-
-    let files: string[];
-    try {
-        files = await fs.promises.readdir(sessionsDir);
-    } catch {
-        return undefined;
-    }
-
-    for (const file of files) {
-        if (!file.endsWith('.jsonl')) {
-            continue;
-        }
-        const filePath = path.join(sessionsDir, file);
-        try {
-            const content = await fs.promises.readFile(filePath, 'utf-8');
-            if (content.includes(needle)) {
-                const stat = await fs.promises.stat(filePath);
-                matches.push({
-                    sessionId: path.basename(file, '.jsonl'),
-                    mtime: stat.mtimeMs,
-                });
-            }
-        } catch {
-            // skip unreadable files
-        }
-    }
-
-    if (matches.length === 0) {
-        return undefined;
-    }
-
-    // Return the most recently modified session
-    matches.sort((a, b) => b.mtime - a.mtime);
-    return matches[0].sessionId;
 }

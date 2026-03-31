@@ -2,14 +2,12 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { HookState, STATE_DIR } from './types';
-import { forEachClaudeTab } from './tabs';
-import { findExistingSession } from './terminal';
 import { STATE_STALE_THRESHOLD_S, STATE_WATCHER_DEBOUNCE_MS } from './constants';
-import { getSessionLogPath, safeJsonParse, ensureDirectoryExists } from './utils';
+import { safeJsonParse, ensureDirectoryExists } from './utils';
+import { getRegistry } from './registry';
 
 // ── Mutable shared state ─────────────────────────────────────────────────────
 
-/** Status bar item for agent attention alerts */
 export let statusBarItem: vscode.StatusBarItem | undefined;
 
 export function setStatusBarItem(item: vscode.StatusBarItem): void {
@@ -19,7 +17,6 @@ export function setStatusBarItem(item: vscode.StatusBarItem): void {
 let globalStateWatcher: fs.FSWatcher | undefined;
 let stateWatchDebounce: ReturnType<typeof setTimeout> | undefined;
 
-// Forward reference: set by dashboard module to avoid circular imports
 let _refreshDashboardFn: (() => void) | undefined;
 let _isDashboardVisible: (() => boolean) | undefined;
 
@@ -39,9 +36,7 @@ export function readHookState(claudeFile: string, sessionMtime?: Date): HookStat
         if (!fs.existsSync(stateFile)) { return undefined; }
         const state = safeJsonParse<HookState>(fs.readFileSync(stateFile, 'utf-8'));
         if (!state) { return undefined; }
-        // Ignore stale states
         if (Date.now() / 1000 - state.timestamp > STATE_STALE_THRESHOLD_S) { return undefined; }
-        // If session log was modified after the state file was written, agent has resumed
         if (sessionMtime && sessionMtime.getTime() / 1000 > state.timestamp + 2) { return undefined; }
         return state;
     } catch {
@@ -68,42 +63,25 @@ export function statusLabel(state: HookState | undefined): { text: string; cssCl
 // ── Waiting agents ───────────────────────────────────────────────────────────
 
 export async function getWaitingAgents(): Promise<{ file: string; state: HookState }[]> {
-    // Build a map of claudeFile name -> session mtime from open tabs
-    const openSessions = new Map<string, Date | undefined>();
-    const tabEntries: { name: string; dir: string }[] = [];
-    forEachClaudeTab((_uri, fsPath) => {
-        tabEntries.push({
-            name: path.basename(fsPath, '.claude'),
-            dir: path.dirname(fsPath),
-        });
-    });
-
-    // Resolve session lookups in parallel
-    await Promise.all(tabEntries.map(async ({ name, dir }) => {
-        const sessionId = await findExistingSession(dir, name);
-        let mtime: Date | undefined;
-        if (sessionId) {
-            const logPath = getSessionLogPath(dir, sessionId);
-            try { mtime = (await fs.promises.stat(logPath)).mtime; } catch {}
-        }
-        openSessions.set(name, mtime);
-    }));
-
+    const registry = getRegistry();
+    await registry.refreshLastActive();
     const waiting: { file: string; state: HookState }[] = [];
+
     try {
         await fs.promises.access(STATE_DIR);
         const files = await fs.promises.readdir(STATE_DIR);
         for (const file of files) {
             if (!file.endsWith('.json')) { continue; }
             const claudeFile = file.replace(/\.json$/, '');
-            // Only count agents that have an open .claude tab
-            if (!openSessions.has(claudeFile)) { continue; }
-            const state = readHookState(claudeFile, openSessions.get(claudeFile));
+            const entry = registry.getByClaudeFile(claudeFile);
+            if (!entry) { continue; }
+            const state = readHookState(claudeFile, entry.lastActive);
             if (state) { waiting.push({ file: claudeFile, state }); }
         }
     } catch {
-        // ignore
+        // state dir not accessible
     }
+
     return waiting;
 }
 
@@ -119,7 +97,7 @@ export async function updateStatusBar(): Promise<void> {
     if (waiting.length === 0) {
         statusBarItem.text = '$(check) Agents active';
         statusBarItem.backgroundColor = undefined;
-        statusBarItem.tooltip = 'All agents are running — no attention needed';
+        statusBarItem.tooltip = 'All agents are running';
     } else {
         const parts: string[] = [];
         if (permCount) { parts.push(`${permCount} permission`); }
@@ -137,10 +115,7 @@ export async function updateStatusBar(): Promise<void> {
 // ── State directory watcher ──────────────────────────────────────────────────
 
 function onStateDirectoryChanged(): void {
-    // Refresh dashboard if visible
     if (_isDashboardVisible?.() && _refreshDashboardFn) { _refreshDashboardFn(); }
-
-    // Update status bar
     updateStatusBar();
 }
 

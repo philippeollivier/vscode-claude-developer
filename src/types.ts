@@ -1,10 +1,9 @@
+import * as vscode from 'vscode';
 import * as path from 'path';
 import * as os from 'os';
 
-// ── Shared interfaces ────────────────────────────────────────────────────────
-
 export interface HookState {
-    type: string; // 'permission_prompt' | 'idle_prompt' | etc.
+    type: string;
     timestamp: number;
     message: string;
 }
@@ -12,7 +11,7 @@ export interface HookState {
 export interface SubagentInfo {
     id: string;
     description: string;
-    subagentType: string; // 'Explore', 'Plan', 'general', etc.
+    subagentType: string;
     running: boolean;
 }
 
@@ -30,9 +29,19 @@ export interface DashboardSettings {
     terminalLocation: string;
     autoSetupOnStart: boolean;
     confirmCloseClaudeFile: boolean;
+    skills: string[];
 }
 
-// ── JSONL log entry types ────────────────────────────────────────────────────
+export interface SessionEntry {
+    filePath: string;
+    claudeFile: string;
+    dir: string;
+    sessionId: string | undefined;
+    terminal: vscode.Terminal | undefined;
+    logPath: string | undefined;
+    hookState: HookState | undefined;
+    lastActive: Date | undefined;
+}
 
 export interface LogContentBlock {
     type: string;
@@ -40,7 +49,6 @@ export interface LogContentBlock {
     id?: string;
     name?: string;
     input?: Record<string, unknown>;
-    /** Present on tool_result blocks inside user message content arrays */
     tool_use_id?: string;
     content?: string | LogContentBlock[];
 }
@@ -54,9 +62,6 @@ export interface LogEntry {
     };
 }
 
-// ── Session parsing helper types ─────────────────────────────────────────────
-
-/** Raw agent tool_use data extracted from JSONL before running-state resolution */
 export interface AgentUseEntry {
     id: string;
     description: string;
@@ -64,20 +69,16 @@ export interface AgentUseEntry {
     background: boolean;
 }
 
-/** Cache entry for subagent parsing — keyed on both mtime and size for reliability */
 export interface SubagentCacheEntry {
     mtimeMs: number;
     size: number;
     result: SubagentInfo[];
 }
 
-/** Parsed data extracted from JSONL content for subagent resolution */
 export interface ParsedAgentData {
     agentUses: AgentUseEntry[];
     resultIds: Set<string>;
     bgAgentIds: Map<string, string>;
 }
-
-// ── Constants ────────────────────────────────────────────────────────────────
 
 export const STATE_DIR = path.join(os.homedir(), '.claude', 'hooks', 'state');

@@ -1,12 +1,10 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { SessionInfo } from './types';
-import { isClaudeFile, getSessionLogPath } from './utils';
+import { isClaudeFile } from './utils';
 import { readHookState } from './state';
-import { findExistingSession } from './terminal';
-import * as fs from 'fs';
+import { getRegistry } from './registry';
 
-/** Find all open tabs whose document URI matches the given string. */
 export function findTabsByUri(targetUri: string): vscode.Tab[] {
     const found: vscode.Tab[] = [];
     for (const group of vscode.window.tabGroups.all) {
@@ -19,7 +17,6 @@ export function findTabsByUri(targetUri: string): vscode.Tab[] {
     return found;
 }
 
-/** Iterate all open .claude tabs (deduplicated by fsPath), invoking callback with the URI and fsPath. */
 export function forEachClaudeTab(callback: (uri: vscode.Uri, fsPath: string) => void): void {
     const seen = new Set<string>();
     for (const group of vscode.window.tabGroups.all) {
@@ -35,30 +32,32 @@ export function forEachClaudeTab(callback: (uri: vscode.Uri, fsPath: string) => 
 }
 
 export async function getOpenClaudeFiles(): Promise<SessionInfo[]> {
-    const entries: { name: string; dir: string }[] = [];
+    const registry = getRegistry();
+    const paths: string[] = [];
 
-    forEachClaudeTab((_uri, fsPath) => {
-        entries.push({
-            name: path.basename(fsPath, '.claude'),
-            dir: path.dirname(fsPath),
-        });
-    });
+    forEachClaudeTab((_uri, fsPath) => { paths.push(fsPath); });
 
-    const results = await Promise.all(entries.map(async ({ name, dir }) => {
-        const sessionId = await findExistingSession(dir, name);
-
-        let logPath: string | undefined;
-        let lastActive: Date | undefined;
-        if (sessionId) {
-            logPath = getSessionLogPath(dir, sessionId);
-            try { lastActive = (await fs.promises.stat(logPath)).mtime; } catch {}
+    await Promise.all(paths.map(async (fsPath) => {
+        if (!registry.has(fsPath)) {
+            await registry.register(fsPath);
+        } else if (!registry.get(fsPath)!.sessionId) {
+            await registry.resolveSessionId(fsPath);
         }
-
-        const hookState = readHookState(name, lastActive);
-        return { claudeFile: name, dir, sessionId, logPath, lastActive, hookState } as SessionInfo;
     }));
 
-    return results;
+    await registry.refreshLastActive();
+
+    for (const fsPath of paths) {
+        const entry = registry.get(fsPath);
+        if (entry) {
+            const hookState = readHookState(entry.claudeFile, entry.lastActive);
+            registry.updateHookState(fsPath, hookState);
+        }
+    }
+
+    return registry.toSessionInfoArray().filter(s =>
+        paths.includes(path.join(s.dir, s.claudeFile + '.claude'))
+    );
 }
 
 export function getOpenClaudeFileNames(): Set<string> {

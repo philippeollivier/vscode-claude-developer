@@ -8,9 +8,8 @@ import { getConfig } from './config';
 import { tailSessionMessages, parseSubagents } from './session';
 import { statusLabel, statusColors, setDashboardCallbacks } from './state';
 import { closeTerminalForEditor, forkSession } from './terminal';
+import { getRegistry } from './registry';
 import { DASHBOARD_REFRESH_INTERVAL_MS, CONFIG_NAMESPACE } from './constants';
-
-// ── Mutable shared state ─────────────────────────────────────────────────────
 
 export let dashboardPanel: vscode.WebviewPanel | undefined;
 export let extensionContext: vscode.ExtensionContext | undefined;
@@ -19,22 +18,16 @@ let dashboardInterval: ReturnType<typeof setInterval> | undefined;
 let canPostMessage = false;
 let panelDisposables: vscode.Disposable[] = [];
 
-// ── Security helpers ────────────────────────────────────────────────────────
-
 function isPathSafe(p: string): boolean {
     const normalized = path.normalize(p);
-    // Reject path traversal
     if (normalized !== p && normalized !== p.replace(/\/$/, '')) { return false; }
-    // Must be absolute
     if (!path.isAbsolute(normalized)) { return false; }
     return true;
 }
 
-// ── Tab-closing helper ──────────────────────────────────────────────────────
-
 async function closeTabByPath(filePath: string): Promise<void> {
+    closeTerminalForEditor(filePath);
     const uri = vscode.Uri.file(filePath).toString();
-    closeTerminalForEditor(uri);
     for (const tab of findTabsByUri(uri)) {
         await vscode.window.tabGroups.close(tab);
     }
@@ -43,8 +36,6 @@ async function closeTabByPath(filePath: string): Promise<void> {
 export function setExtensionContext(ctx: vscode.ExtensionContext): void {
     extensionContext = ctx;
 }
-
-// ── Setting renderers ────────────────────────────────────────────────────────
 
 export function renderToggleSetting(label: string, description: string, settingKey: string, checked: boolean): string {
     return `<div class="setting-row">
@@ -75,8 +66,6 @@ export function renderSelectSetting(label: string, description: string, settingK
                     </div>
                 </div>`;
 }
-
-// ── Card renderer ────────────────────────────────────────────────────────────
 
 export function renderCard(s: SessionInfo, summaries: Map<string, string>, subagents: Map<string, SubagentInfo[]>, groupColor: string = ''): string {
     const tailLines = summaries.get(s.claudeFile) ?? '';
@@ -113,7 +102,7 @@ export function renderCard(s: SessionInfo, summaries: Map<string, string>, subag
     const labelText = timeText ? `${statusText} · ${timeText}` : statusText;
 
     return `
-            <div class="card" style="${groupColor ? `border-left: 3px solid ${groupColor};` : ''}" onclick="vscode.postMessage({command:'open', path:'${escapedPath}'})" title="Open ${escapeHtml(s.claudeFile)}">
+            <div class="card" data-path="${escapedPath}" style="${groupColor ? `border-left: 3px solid ${groupColor};` : ''}" onclick="vscode.postMessage({command:'open', path:'${escapedPath}'})" title="Open ${escapeHtml(s.claudeFile)}">
                 <div class="card-header">
                     <div class="card-title">
                         <span class="status-label ${cssClass}">${escapeHtml(labelText)}</span>
@@ -130,23 +119,13 @@ export function renderCard(s: SessionInfo, summaries: Map<string, string>, subag
             </div>`;
 }
 
-// ── Dashboard HTML ───────────────────────────────────────────────────────────
-
-// Rotating color palette for group accents (works well on dark themes)
 const groupColors = [
-    '#7eb4f0', // soft blue
-    '#b89aed', // lavender
-    '#6ec8a0', // mint green
-    '#e0a36a', // warm amber
-    '#e07a9a', // rose
-    '#6ac4c4', // teal
-    '#c4a95a', // gold
-    '#a0a0d0', // periwinkle
+    '#7eb4f0', '#b89aed', '#6ec8a0', '#e0a36a',
+    '#e07a9a', '#6ac4c4', '#c4a95a', '#a0a0d0',
 ];
 
-/** Sort sessions so forks appear immediately after their parent */
+/** Sort sessions so forks appear immediately after their parent. */
 function sortWithForks(items: SessionInfo[]): SessionInfo[] {
-    // Group by fork base name
     const byBase = new Map<string, SessionInfo[]>();
     for (const s of items) {
         const base = getForkBase(s.claudeFile);
@@ -154,7 +133,6 @@ function sortWithForks(items: SessionInfo[]): SessionInfo[] {
         list.push(s);
         byBase.set(base, list);
     }
-    // Within each group, parent first (no ~N), then forks sorted by number
     const sorted: SessionInfo[] = [];
     for (const group of byBase.values()) {
         group.sort((a, b) => {
@@ -272,6 +250,11 @@ export function getDashboardHtml(sessions: SessionInfo[], summaries: Map<string,
         .hotkeys { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; }
         .hotkey-key { font-family: var(--vscode-editor-font-family); font-size: 11px; background: var(--vscode-textCodeBlock-background, rgba(255,255,255,0.06)); padding: 2px 6px; border-radius: 3px; text-align: right; white-space: nowrap; }
         .hotkey-desc { font-size: 12px; color: var(--vscode-descriptionForeground); }
+        .context-menu { position: fixed; z-index: 1000; background: var(--vscode-menu-background, var(--vscode-editor-background)); border: 1px solid var(--vscode-menu-border, var(--vscode-panel-border)); border-radius: 6px; padding: 4px 0; min-width: 180px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+        .context-menu-item { padding: 6px 14px; font-size: 12px; cursor: pointer; color: var(--vscode-menu-foreground, var(--vscode-foreground)); display: flex; align-items: center; gap: 8px; }
+        .context-menu-item:hover { background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground)); color: var(--vscode-menu-selectionForeground, var(--vscode-foreground)); }
+        .context-menu-item .skill-slash { opacity: 0.5; }
+        .context-menu-separator { height: 1px; background: var(--vscode-menu-separatorBackground, var(--vscode-panel-border)); margin: 4px 0; }
     </style>
 </head>
 <body>
@@ -303,6 +286,59 @@ export function getDashboardHtml(sessions: SessionInfo[], summaries: Map<string,
     </div>
     <script>
         const vscode = acquireVsCodeApi();
+        const skills = ${JSON.stringify(settings.skills)};
+
+        let activeMenu = null;
+
+        function showContextMenu(e, cardPath) {
+            e.preventDefault();
+            e.stopPropagation();
+            dismissContextMenu();
+            if (skills.length === 0) return;
+
+            const menu = document.createElement('div');
+            menu.className = 'context-menu';
+
+            skills.forEach(skill => {
+                const item = document.createElement('div');
+                item.className = 'context-menu-item';
+                item.innerHTML = '<span class="skill-slash">/</span>' + skill.replace(/^\\//, '');
+                item.addEventListener('click', (ev) => {
+                    ev.stopPropagation();
+                    vscode.postMessage({ command: 'sendSkill', path: cardPath, skill: skill });
+                    dismissContextMenu();
+                });
+                menu.appendChild(item);
+            });
+
+            document.body.appendChild(menu);
+            activeMenu = menu;
+
+            const rect = menu.getBoundingClientRect();
+            let x = e.clientX, y = e.clientY;
+            if (x + rect.width > window.innerWidth) x = window.innerWidth - rect.width - 4;
+            if (y + rect.height > window.innerHeight) y = window.innerHeight - rect.height - 4;
+            if (x < 0) x = 4;
+            if (y < 0) y = 4;
+            menu.style.left = x + 'px';
+            menu.style.top = y + 'px';
+        }
+
+        function dismissContextMenu() {
+            if (activeMenu) {
+                activeMenu.remove();
+                activeMenu = null;
+            }
+        }
+
+        document.addEventListener('click', dismissContextMenu);
+        document.addEventListener('contextmenu', (e) => {
+            const card = e.target.closest('.card');
+            if (!card) { dismissContextMenu(); return; }
+            const cardPath = card.dataset.path;
+            if (cardPath) showContextMenu(e, cardPath);
+        });
+
         function toggleSettings() {
             const body = document.getElementById('settingsBody');
             const arrow = document.getElementById('settingsArrow');
@@ -312,12 +348,11 @@ export function getDashboardHtml(sessions: SessionInfo[], summaries: Map<string,
             state.settingsOpen = body.classList.contains('open');
             vscode.setState(state);
         }
-        // Handle content updates with scroll anchoring
+
         window.addEventListener('message', event => {
             const msg = event.data;
             if (msg.command === 'updateContent') {
                 const container = document.getElementById('content');
-                // Find the first card visible in the viewport as our anchor
                 const cards = container.querySelectorAll('.card');
                 let anchorName = null;
                 let anchorOffset = 0;
@@ -331,7 +366,6 @@ export function getDashboardHtml(sessions: SessionInfo[], summaries: Map<string,
                     }
                 }
                 container.innerHTML = msg.html;
-                // Scroll so the same card stays at the same viewport position
                 if (anchorName) {
                     const newH2s = container.querySelectorAll('.card h2');
                     for (const h2 of newH2s) {
@@ -344,7 +378,7 @@ export function getDashboardHtml(sessions: SessionInfo[], summaries: Map<string,
                 }
             }
         });
-        // Restore state after refresh
+
         (function() {
             const state = vscode.getState() || {};
             if (state.settingsOpen) {
@@ -354,7 +388,6 @@ export function getDashboardHtml(sessions: SessionInfo[], summaries: Map<string,
             if (state.scrollTop) {
                 document.documentElement.scrollTop = state.scrollTop;
             }
-            // Persist scroll position
             window.addEventListener('scroll', () => {
                 const s = vscode.getState() || {};
                 s.scrollTop = document.documentElement.scrollTop;
@@ -365,8 +398,6 @@ export function getDashboardHtml(sessions: SessionInfo[], summaries: Map<string,
 </body>
 </html>`;
 }
-
-// ── Dashboard lifecycle ──────────────────────────────────────────────────────
 
 export async function refreshDashboard(): Promise<void> {
     if (!dashboardPanel) { return; }
@@ -385,18 +416,16 @@ export async function refreshDashboard(): Promise<void> {
                 subagentMap.set(s.claudeFile, agents);
             }
         } catch {
-            // skip
+            // skip unreadable logs
         }
     }
 
     if (canPostMessage) {
-        // Incremental update: only swap the cards content, preserving scroll
         dashboardPanel.webview.postMessage({
             command: 'updateContent',
             html: getCardsHtml(sessions, summaries, subagentMap),
         });
     } else {
-        // Full render: first load or after panel was hidden/restored
         dashboardPanel.webview.html = getDashboardHtml(sessions, summaries, getConfig(), subagentMap);
         canPostMessage = true;
     }
@@ -404,8 +433,6 @@ export async function refreshDashboard(): Promise<void> {
 
 export function startDashboardAutoRefresh(): void {
     stopDashboardAutoRefresh();
-
-    // Interval refresh
     dashboardInterval = setInterval(() => {
         if (dashboardPanel?.visible) { refreshDashboard(); }
     }, DASHBOARD_REFRESH_INTERVAL_MS);
@@ -437,31 +464,39 @@ export async function openDashboard(): Promise<void> {
         }));
         panelDisposables.push(dashboardPanel.onDidChangeViewState(() => {
             if (dashboardPanel?.visible) {
-                canPostMessage = false; // JS context lost when hidden; need full render
+                canPostMessage = false;
                 refreshDashboard();
             }
         }));
         panelDisposables.push(dashboardPanel.webview.onDidReceiveMessage(async (msg) => {
             if (msg.command === 'refresh') { refreshDashboard(); }
+
             if (msg.command === 'open' && msg.path) {
                 if (!isPathSafe(msg.path as string)) { return; }
-                vscode.window.showTextDocument(vscode.Uri.file(msg.path));
+                const uri = vscode.Uri.file(msg.path as string);
+                const tabs = findTabsByUri(uri.toString());
+                const viewColumn = tabs.length > 0 ? tabs[0].group.viewColumn : vscode.ViewColumn.One;
+                vscode.window.showTextDocument(uri, { viewColumn, preserveFocus: false });
             }
+
             if (msg.command === 'setting' && msg.key) {
                 const config = vscode.workspace.getConfiguration(CONFIG_NAMESPACE);
                 const settingKey = (msg.key as string).replace(`${CONFIG_NAMESPACE}.`, '');
                 await config.update(settingKey, msg.value, vscode.ConfigurationTarget.Global);
             }
+
             if (msg.command === 'fork' && msg.path && extensionContext) {
                 if (!isPathSafe(msg.path as string)) { return; }
                 await forkSession(vscode.Uri.file(msg.path).toString(), extensionContext);
                 refreshDashboard();
             }
+
             if (msg.command === 'close' && msg.path) {
                 if (!isPathSafe(msg.path as string)) { return; }
                 await closeTabByPath(msg.path as string);
                 refreshDashboard();
             }
+
             if (msg.command === 'create' && msg.dir) {
                 if (!isPathSafe(msg.dir as string)) { return; }
                 const name = await vscode.window.showInputBox({
@@ -490,6 +525,17 @@ export async function openDashboard(): Promise<void> {
                     refreshDashboard();
                 }
             }
+
+            if (msg.command === 'sendSkill' && msg.path && msg.skill) {
+                if (!isPathSafe(msg.path as string)) { return; }
+                const entry = getRegistry().get(msg.path as string);
+                if (entry?.terminal) {
+                    entry.terminal.sendText(msg.skill as string);
+                } else {
+                    vscode.window.showWarningMessage(`No terminal found for ${path.basename(msg.path as string, '.claude')}`);
+                }
+            }
+
             if (msg.command === 'delete' && msg.path) {
                 if (!isPathSafe(msg.path as string)) { return; }
                 const filePath = msg.path as string;
@@ -503,7 +549,6 @@ export async function openDashboard(): Promise<void> {
     refreshDashboard();
 }
 
-// Register callbacks with state module (called at import time to wire up the dependency)
 setDashboardCallbacks(
     () => refreshDashboard(),
     () => dashboardPanel?.visible ?? false,
