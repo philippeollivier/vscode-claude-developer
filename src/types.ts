@@ -6,6 +6,12 @@ export interface HookState {
     type: string;
     timestamp: number;
     message: string;
+    cwd?: string;
+    tab?: string;
+    tool_name?: string;
+    tool_input_summary?: string;
+    hook_event?: string;
+    stop_reason?: string;
 }
 
 export interface SubagentInfo {
@@ -15,6 +21,13 @@ export interface SubagentInfo {
     running: boolean;
 }
 
+export interface TaskInfo {
+    isTask: true;
+    skill: string;
+    taskId: string;
+    startedAt: Date;
+}
+
 export interface SessionInfo {
     claudeFile: string;
     dir: string;
@@ -22,6 +35,7 @@ export interface SessionInfo {
     logPath: string | undefined;
     lastActive: Date | undefined;
     hookState: HookState | undefined;
+    task?: TaskInfo;
 }
 
 export interface DashboardSettings {
@@ -41,6 +55,7 @@ export interface SessionEntry {
     logPath: string | undefined;
     hookState: HookState | undefined;
     lastActive: Date | undefined;
+    task?: TaskInfo;
 }
 
 export interface LogContentBlock {

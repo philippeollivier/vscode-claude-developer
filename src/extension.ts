@@ -11,6 +11,7 @@ import {
     closeTerminalForEditor,
     withSyncGuard,
     forkSession,
+    openTaskTerminal,
 } from './terminal';
 import {
     setStatusBarItem,
@@ -154,7 +155,13 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     const terminalCloseListener = vscode.window.onDidCloseTerminal((terminal) => {
+        const entry = registry.getByTerminal(terminal);
+        const wasTask = entry?.task;
         registry.clearTerminalByRef(terminal);
+        // Auto-unregister task entries when their terminal closes
+        if (wasTask && entry) {
+            registry.unregister(entry.filePath);
+        }
     });
 
     async function closeNonClaudeFiles() {
@@ -221,6 +228,29 @@ export function activate(context: vscode.ExtensionContext) {
         }
     );
 
+    const runTaskCommand = vscode.commands.registerCommand(
+        'tabTerminal.runTask',
+        async () => {
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            if (!workspaceFolders?.length) {
+                vscode.window.showWarningMessage('No workspace folder open');
+                return;
+            }
+            const dir = workspaceFolders[0].uri.fsPath;
+            const skills = getConfig().skills;
+            const items = [...skills, 'Custom command...'];
+            const picked = await vscode.window.showQuickPick(items, { placeHolder: 'Select a skill to run' });
+            if (!picked) { return; }
+            let skill = picked;
+            if (picked === 'Custom command...') {
+                const input = await vscode.window.showInputBox({ prompt: 'Enter command' });
+                if (!input) { return; }
+                skill = input;
+            }
+            await openTaskTerminal(dir, skill, context);
+        }
+    );
+
     const closeNonClaudeCommand = vscode.commands.registerCommand(
         'tabTerminal.closeNonClaudeFiles',
         () => closeNonClaudeFiles()
@@ -229,6 +259,7 @@ export function activate(context: vscode.ExtensionContext) {
     async function initializeWorkspace() {
         await closeNonClaudeFiles();
         await openTerminalsForAllClaudeFiles();
+        registry.reconnectTaskTerminals();
         openDashboard();
     }
 
@@ -280,6 +311,7 @@ export function activate(context: vscode.ExtensionContext) {
         closeTerminalCommand,
         toggleAutoCommand,
         forkCommand,
+        runTaskCommand,
         closeNonClaudeCommand,
         dashboardCommand,
         goToNotificationCommand,

@@ -1,4 +1,5 @@
 export const STATE_STALE_THRESHOLD_S = 30 * 60;
+export const STATE_TOOL_STALE_THRESHOLD_S = 5 * 60;
 export const STATE_WATCHER_DEBOUNCE_MS = 500;
 export const TAIL_CHUNK_SIZE = 262_144;
 export const SUBAGENT_ACTIVE_THRESHOLD_MS = 30_000;

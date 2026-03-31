@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { HookState, STATE_DIR } from './types';
-import { STATE_STALE_THRESHOLD_S, STATE_WATCHER_DEBOUNCE_MS } from './constants';
+import { STATE_STALE_THRESHOLD_S, STATE_TOOL_STALE_THRESHOLD_S, STATE_WATCHER_DEBOUNCE_MS } from './constants';
 import { safeJsonParse, ensureDirectoryExists } from './utils';
 import { getRegistry } from './registry';
 
@@ -19,16 +19,37 @@ let stateWatchDebounce: ReturnType<typeof setTimeout> | undefined;
 
 let _refreshDashboardFn: (() => void) | undefined;
 let _isDashboardVisible: (() => boolean) | undefined;
+let _openDashboardFn: (() => void) | undefined;
+let _openFileFn: ((claudeFile: string) => void) | undefined;
 
 export function setDashboardCallbacks(
     refreshFn: () => void,
     isVisibleFn: () => boolean,
+    openDashboardFn?: () => void,
+    openFileFn?: (claudeFile: string) => void,
 ): void {
     _refreshDashboardFn = refreshFn;
     _isDashboardVisible = isVisibleFn;
+    _openDashboardFn = openDashboardFn;
+    _openFileFn = openFileFn;
 }
 
 // ── Hook state helpers ───────────────────────────────────────────────────────
+
+const ATTENTION_TYPES = new Set(['permission_prompt', 'idle_prompt', 'error']);
+
+function getStaleThreshold(type: string): number {
+    switch (type) {
+        case 'stopped':
+        case 'error':
+            return Infinity;
+        case 'executing_tool':
+        case 'processing':
+            return STATE_TOOL_STALE_THRESHOLD_S;
+        default:
+            return STATE_STALE_THRESHOLD_S;
+    }
+}
 
 export function readHookState(claudeFile: string, sessionMtime?: Date): HookState | undefined {
     try {
@@ -36,7 +57,9 @@ export function readHookState(claudeFile: string, sessionMtime?: Date): HookStat
         if (!fs.existsSync(stateFile)) { return undefined; }
         const state = safeJsonParse<HookState>(fs.readFileSync(stateFile, 'utf-8'));
         if (!state) { return undefined; }
-        if (Date.now() / 1000 - state.timestamp > STATE_STALE_THRESHOLD_S) { return undefined; }
+        const age = Date.now() / 1000 - state.timestamp;
+        const threshold = getStaleThreshold(state.type);
+        if (threshold !== Infinity && age > threshold) { return undefined; }
         if (sessionMtime && sessionMtime.getTime() / 1000 > state.timestamp + 2) { return undefined; }
         return state;
     } catch {
@@ -45,17 +68,28 @@ export function readHookState(claudeFile: string, sessionMtime?: Date): HookStat
 }
 
 export const statusColors: Record<string, string> = {
-    'status-active': '#3bb44a',
+    'status-unknown': '#888888',
     'status-permission': '#e5534b',
-    'status-idle': '#d4a72c',
+    'status-error': '#e5534b',
+    'status-executing': '#4a9eff',
+    'status-processing': '#4a9eff',
+    'status-idle': '#3bb44a',
+    'status-done': '#3bb44a',
     'status-other': '#e09b13',
 };
 
 export function statusLabel(state: HookState | undefined): { text: string; cssClass: string } {
-    if (!state) { return { text: 'Active', cssClass: 'status-active' }; }
+    if (!state) { return { text: 'Unknown', cssClass: 'status-unknown' }; }
     switch (state.type) {
         case 'permission_prompt': return { text: 'Pending Permission', cssClass: 'status-permission' };
         case 'idle_prompt': return { text: 'Waiting on User', cssClass: 'status-idle' };
+        case 'error': return { text: 'Error', cssClass: 'status-error' };
+        case 'executing_tool': {
+            const label = state.tool_name ? `Running ${state.tool_name}` : 'Executing';
+            return { text: label, cssClass: 'status-executing' };
+        }
+        case 'processing': return { text: 'Processing', cssClass: 'status-processing' };
+        case 'stopped': return { text: 'Done', cssClass: 'status-done' };
         default: return { text: state.type, cssClass: 'status-other' };
     }
 }
@@ -76,7 +110,9 @@ export async function getWaitingAgents(): Promise<{ file: string; state: HookSta
             const entry = registry.getByClaudeFile(claudeFile);
             if (!entry) { continue; }
             const state = readHookState(claudeFile, entry.lastActive);
-            if (state) { waiting.push({ file: claudeFile, state }); }
+            if (state && ATTENTION_TYPES.has(state.type)) {
+                waiting.push({ file: claudeFile, state });
+            }
         }
     } catch {
         // state dir not accessible
@@ -93,6 +129,7 @@ export async function updateStatusBar(): Promise<void> {
     const waiting = await getWaitingAgents();
     const permCount = waiting.filter(w => w.state.type === 'permission_prompt').length;
     const idleCount = waiting.filter(w => w.state.type === 'idle_prompt').length;
+    const errorCount = waiting.filter(w => w.state.type === 'error').length;
 
     if (waiting.length === 0) {
         statusBarItem.text = '$(check) Agents active';
@@ -102,13 +139,39 @@ export async function updateStatusBar(): Promise<void> {
         const parts: string[] = [];
         if (permCount) { parts.push(`${permCount} permission`); }
         if (idleCount) { parts.push(`${idleCount} idle`); }
+        if (errorCount) { parts.push(`${errorCount} error`); }
         const detail = parts.join(', ');
 
         statusBarItem.text = `$(bell) ${waiting.length} agent${waiting.length > 1 ? 's' : ''} waiting`;
         statusBarItem.tooltip = `${detail}\nClick to cycle (Cmd+Shift+D)`;
-        statusBarItem.backgroundColor = permCount > 0
+        statusBarItem.backgroundColor = (permCount > 0 || errorCount > 0)
             ? new vscode.ThemeColor('statusBarItem.errorBackground')
             : new vscode.ThemeColor('statusBarItem.warningBackground');
+    }
+}
+
+// ── In-editor notifications ─────────────────────────────────────────────────
+
+const notifiedTimestamps = new Map<string, number>();
+
+async function showInEditorNotifications(): Promise<void> {
+    const waiting = await getWaitingAgents();
+    for (const w of waiting) {
+        const prev = notifiedTimestamps.get(w.file);
+        if (prev && prev >= w.state.timestamp) { continue; }
+        notifiedTimestamps.set(w.file, w.state.timestamp);
+
+        const label = w.state.type === 'error' ? 'Error' : w.state.message;
+        const action = await vscode.window.showWarningMessage(
+            `${w.file}: ${label}`,
+            'Go to File',
+            'Open Dashboard',
+        );
+        if (action === 'Go to File' && _openFileFn) {
+            _openFileFn(w.file);
+        } else if (action === 'Open Dashboard' && _openDashboardFn) {
+            _openDashboardFn();
+        }
     }
 }
 
@@ -117,6 +180,7 @@ export async function updateStatusBar(): Promise<void> {
 function onStateDirectoryChanged(): void {
     if (_isDashboardVisible?.() && _refreshDashboardFn) { _refreshDashboardFn(); }
     updateStatusBar();
+    showInEditorNotifications();
 }
 
 export function startGlobalStateWatcher(): void {

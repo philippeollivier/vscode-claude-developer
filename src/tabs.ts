@@ -55,9 +55,25 @@ export async function getOpenClaudeFiles(): Promise<SessionInfo[]> {
         }
     }
 
-    return registry.toSessionInfoArray().filter(s =>
-        paths.includes(path.join(s.dir, s.claudeFile + '.claude'))
+    const fileSessions = registry.toSessionInfoArray().filter(s =>
+        !s.task && paths.includes(path.join(s.dir, s.claudeFile + '.claude'))
     );
+
+    // Include live task terminals
+    registry.validateAllTerminals();
+    const taskSessions = registry.getTaskEntries()
+        .filter(e => e.terminal)
+        .map(e => ({
+            claudeFile: e.claudeFile,
+            dir: e.dir,
+            sessionId: e.sessionId,
+            logPath: e.logPath,
+            lastActive: e.lastActive,
+            hookState: e.hookState,
+            task: e.task,
+        }));
+
+    return [...fileSessions, ...taskSessions];
 }
 
 export function getOpenClaudeFileNames(): Set<string> {

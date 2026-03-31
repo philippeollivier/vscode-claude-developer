@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
-import { SessionEntry, SessionInfo, HookState } from './types';
+import { SessionEntry, SessionInfo, HookState, TaskInfo } from './types';
 import { dirToProjectName, getSessionLogPath, isClaudeFile } from './utils';
 import { REGISTRY_PERSISTENCE_KEY } from './constants';
 
@@ -113,6 +113,36 @@ export class SessionRegistry {
         await this.resolveSessionId(filePath);
 
         return entry;
+    }
+
+    /** Register a task terminal (no .claude file). Returns the entry. */
+    registerTask(dir: string, skill: string, terminal: vscode.Terminal): SessionEntry {
+        const taskId = `task://${dir}/${Date.now()}-${skill.replace(/^\//, '')}`;
+        const displayName = skill.replace(/^\//, '');
+        const entry: SessionEntry = {
+            filePath: taskId,
+            claudeFile: displayName,
+            dir,
+            sessionId: undefined,
+            terminal: undefined,
+            logPath: undefined,
+            hookState: undefined,
+            lastActive: new Date(),
+            task: { isTask: true, skill, taskId, startedAt: new Date() },
+        };
+        this._entries.set(taskId, entry);
+        this._setTerminalInternal(entry, terminal);
+        return entry;
+    }
+
+    /** Get all task terminal entries. */
+    getTaskEntries(): SessionEntry[] {
+        return [...this._entries.values()].filter(e => e.task);
+    }
+
+    /** Check if a key is a task terminal key. */
+    static isTaskKey(key: string): boolean {
+        return key.startsWith('task://');
     }
 
     /** Remove an entry entirely. */
@@ -231,6 +261,9 @@ export class SessionRegistry {
     }
 
     private async _resolveSessionIdImpl(entry: SessionEntry): Promise<string | undefined> {
+        // Task terminals don't have a named session to resolve
+        if (entry.task) { return undefined; }
+
         // Check globalState cache
         const persisted = this._globalState.get<Record<string, string>>(REGISTRY_PERSISTENCE_KEY, {});
         const cached = persisted[entry.filePath];
@@ -320,6 +353,7 @@ export class SessionRegistry {
                 logPath: entry.logPath,
                 lastActive: entry.lastActive,
                 hookState: entry.hookState,
+                task: entry.task,
             });
         }
         return result;
@@ -335,6 +369,26 @@ export class SessionRegistry {
             }
         }
         await this._globalState.update(REGISTRY_PERSISTENCE_KEY, mappings);
+    }
+
+    // ── Task reconnection ────────────────────────────────────────────────
+
+    /** Reconnect orphaned task terminals after extension reload. */
+    reconnectTaskTerminals(): void {
+        const prefix = 'Task: ';
+        for (const terminal of vscode.window.terminals) {
+            if (!terminal.name.startsWith(prefix)) { continue; }
+            if (this._terminalIndex.has(terminal)) { continue; }
+            const skill = '/' + terminal.name.slice(prefix.length);
+            // Use the terminal's creationOptions.cwd if available, otherwise fallback
+            const opts = terminal.creationOptions as { cwd?: string | vscode.Uri };
+            const dir = opts?.cwd
+                ? (typeof opts.cwd === 'string' ? opts.cwd : opts.cwd.fsPath)
+                : '';
+            if (dir) {
+                this.registerTask(dir, skill, terminal);
+            }
+        }
     }
 
     // ── Cleanup ─────────────────────────────────────────────────────────

@@ -141,6 +141,38 @@ export async function forkSession(
     }, 200);
 }
 
+/** Open a task terminal: runs claude with a skill command, no .claude file. */
+export async function openTaskTerminal(
+    dir: string,
+    skill: string,
+    context: vscode.ExtensionContext,
+): Promise<void> {
+    const registry = getRegistry();
+    const config = getConfig();
+    const displayName = `Task: ${skill.replace(/^\//, '')}`;
+
+    const terminal = vscode.window.createTerminal({
+        name: displayName,
+        cwd: dir,
+        iconPath: vscode.Uri.joinPath(context.extensionUri, 'claude-icon.svg'),
+        location: config.terminalLocation === 'right'
+            ? vscode.TerminalLocation.Editor
+            : vscode.TerminalLocation.Panel,
+    });
+
+    registry.registerTask(dir, skill, terminal);
+
+    if (config.terminalLocation === 'right') {
+        terminal.show(true);
+        vscode.commands.executeCommand('workbench.action.moveEditorToRightGroup');
+    } else {
+        terminal.show(true);
+    }
+
+    const skillCmd = skill.startsWith('/') ? skill : `/${skill}`;
+    terminal.sendText(`{ echo '${skillCmd}'; exec < /dev/tty; } | claude`);
+}
+
 export function closeTerminalForEditor(filePath: string): void {
     const registry = getRegistry();
     // Support both fsPath and URI string for backward compat

@@ -49,6 +49,11 @@
         "command": "tabTerminal.forkSession",
         "title": "Fork Current Session",
         "category": "Claude Developer"
+      },
+      {
+        "command": "tabTerminal.runTask",
+        "title": "Run Task",
+        "category": "Claude Developer"
       }
     ],
     "keybindings": [
@@ -98,7 +103,7 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
+    "compile": "tsc -p ./ && cp -r out package.json claude-icon.svg ~/.vscode/extensions/undefined_publisher.claude-developer-0.0.1/",
     "watch": "tsc -watch -p ./",
     "lint": "eslint src --ext ts"
   },
