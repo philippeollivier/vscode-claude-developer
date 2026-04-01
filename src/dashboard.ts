@@ -269,9 +269,10 @@ async function handleExpandAgent(msg: any): Promise<void> {
 }
 
 async function handleCreateSection(): Promise<void> {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
     const dir = await vscode.window.showInputBox({
         prompt: 'Directory path for the new section',
-        placeHolder: '/Users/you/projects/my-project',
+        value: workspaceFolder,
         validateInput: (v) => {
             const trimmed = v.trim();
             if (!trimmed) { return 'Path cannot be empty'; }
