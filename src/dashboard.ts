@@ -268,6 +268,50 @@ async function handleExpandAgent(msg: any): Promise<void> {
     }
 }
 
+async function handleCreateSection(): Promise<void> {
+    const dir = await vscode.window.showInputBox({
+        prompt: 'Directory path for the new section',
+        placeHolder: '/Users/you/projects/my-project',
+        validateInput: (v) => {
+            const trimmed = v.trim();
+            if (!trimmed) { return 'Path cannot be empty'; }
+            if (!path.isAbsolute(trimmed)) { return 'Path must be absolute'; }
+            return undefined;
+        },
+    });
+    if (!dir) { return; }
+    const dirPath = dir.trim();
+
+    // Create directory if it doesn't exist
+    if (!fs.existsSync(dirPath)) {
+        fs.mkdirSync(dirPath, { recursive: true });
+    }
+
+    const name = await vscode.window.showInputBox({
+        prompt: 'New .claude file name',
+        placeHolder: 'my-task',
+        validateInput: (v) => {
+            const trimmed = v.trim();
+            if (!trimmed) { return 'Name cannot be empty'; }
+            if (trimmed !== v) { return 'No leading or trailing spaces'; }
+            const baseName = trimmed.replace(/\.claude$/, '');
+            if (/[/\\:]/.test(baseName)) { return 'Invalid characters'; }
+            if (/^\.{1,2}$/.test(baseName)) { return 'Name cannot be just dots'; }
+            return undefined;
+        },
+    });
+    if (!name) { return; }
+
+    let fileName = name.trim();
+    if (!fileName.endsWith('.claude')) { fileName += '.claude'; }
+    const filePath = path.join(dirPath, fileName);
+    if (!fs.existsSync(filePath)) {
+        fs.writeFileSync(filePath, '');
+    }
+    await vscode.window.showTextDocument(vscode.Uri.file(filePath));
+    refreshDashboard();
+}
+
 async function handleCloseTask(msg: any): Promise<void> {
     if (!msg.taskId) { return; }
     const entry = getRegistry().get(msg.taskId as string);
@@ -299,6 +343,7 @@ const messageHandlers: Record<string, (msg: any) => Promise<void>> = {
     'configureHooks': handleConfigureHooks,
     'expandAgent': handleExpandAgent,
     'closeTask': handleCloseTask,
+    'createSection': handleCreateSection,
 };
 
 // ---------------------------------------------------------------------------
@@ -417,7 +462,7 @@ export function getDashboardHtml(sessions: SessionInfo[], summaries: Map<string,
 
                 skills.forEach(skill => {
                     menu.appendChild(createMenuItem(
-                        '<span class="skill-slash">/</span>' + skill.replace(/^\\\\//, ''),
+                        '<span class="skill-slash">/</span>' + skill.replace(/^\\//, ''),
                         () => {
                             vscode.postMessage({ command: 'sendSkill', path: cardPath, skill: skill });
                             dismissCardMenu();
@@ -565,7 +610,7 @@ export function getDashboardHtml(sessions: SessionInfo[], summaries: Map<string,
 
             skills.forEach(skill => {
                 menu.appendChild(createMenuItem(
-                    '<span class="skill-slash">/</span>' + skill.replace(/^\\\\//, ''),
+                    '<span class="skill-slash">/</span>' + skill.replace(/^\\//, ''),
                     () => {
                         dismissCardMenu();
                         vscode.postMessage({ command: 'runTask', dir: dir, skill: skill });
