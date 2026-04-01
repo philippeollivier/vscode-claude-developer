@@ -24,6 +24,16 @@ export function initializeOpenPaths(): void {
 
 // ── Tab utilities ───────────────────────────────────────────────────────────
 
+export function forAllTextTabs(callback: (tab: vscode.Tab, uri: vscode.Uri, fsPath: string) => void): void {
+    for (const group of vscode.window.tabGroups.all) {
+        for (const tab of group.tabs) {
+            if (tab.input instanceof vscode.TabInputText) {
+                callback(tab, tab.input.uri, tab.input.uri.fsPath);
+            }
+        }
+    }
+}
+
 export function findTabsByUri(targetUri: string): vscode.Tab[] {
     const found: vscode.Tab[] = [];
     for (const group of vscode.window.tabGroups.all) {
@@ -91,12 +101,4 @@ export async function getOpenClaudeFiles(): Promise<SessionInfo[]> {
         }));
 
     return [...fileSessions, ...taskSessions];
-}
-
-export function getOpenClaudeFileNames(): Set<string> {
-    const names = new Set<string>();
-    forEachClaudeTab((_uri, fsPath) => {
-        names.add(path.basename(fsPath, '.claude'));
-    });
-    return names;
 }

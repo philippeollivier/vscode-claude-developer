@@ -2,16 +2,28 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as os from 'os';
 
+/** State written by state-tracker.py to ~/.claude/hooks/state/{CLAUDE_FILE}.json */
 export interface HookState {
+    /** Status type — see StatusType in constants.ts for known values */
     type: string;
+    /** Unix timestamp (seconds) when the hook fired */
     timestamp: number;
+    /** Human-readable status message */
     message: string;
+    /** Working directory of the Claude session */
     cwd?: string;
+    /** CLAUDE_FILE env var value (basename of .claude file) */
     tab?: string;
+    /** Tool name — present when type is 'executing_tool' or 'processing' (last tool) */
     tool_name?: string;
+    /** Short summary of tool input (max 80 chars) — present when type is 'executing_tool' */
     tool_input_summary?: string;
+    /** Which hook event wrote this entry (e.g., 'PreToolUse', 'Stop') */
     hook_event?: string;
+    /** Error details — present when type is 'error' (max 200 chars) */
     stop_reason?: string;
+    /** Session UUID — present when hook_event is 'SessionStart' */
+    session_id?: string;
 }
 
 export interface SubagentInfo {
@@ -19,6 +31,7 @@ export interface SubagentInfo {
     description: string;
     subagentType: string;
     running: boolean;
+    logPath?: string;
 }
 
 export interface TaskInfo {
@@ -96,20 +109,17 @@ export interface ParsedAgentData {
     bgAgentIds: Map<string, string>;
 }
 
-export type DashboardMessage =
-    | { command: 'refresh' }
-    | { command: 'open'; path: string }
-    | { command: 'revealTerminal'; path: string }
-    | { command: 'setting'; key: string; value: unknown }
-    | { command: 'fork'; path: string }
-    | { command: 'close'; path: string }
-    | { command: 'create'; dir: string }
-    | { command: 'sendMessage'; path: string }
-    | { command: 'sendSkill'; path: string; skill: string }
-    | { command: 'delete'; path: string }
-    | { command: 'runTask'; dir: string; skill: string }
-    | { command: 'addTaskCommand'; dir: string }
-    | { command: 'revealTaskTerminal'; taskId: string }
-    | { command: 'closeTask'; taskId: string };
-
 export const STATE_DIR = path.join(os.homedir(), '.claude', 'hooks', 'state');
+
+export interface SetupStatus {
+    hooksInstalled: boolean;
+    missingHookFiles: string[];
+    settingsConfigured: boolean;
+    hooksVersion: number | undefined;
+    needsUpdate: boolean;
+    dependencies: {
+        python3: boolean;
+        jq: boolean;
+        terminalNotifier: boolean;
+    };
+}

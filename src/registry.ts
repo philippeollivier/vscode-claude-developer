@@ -212,59 +212,57 @@ export class SessionRegistry {
     }
 
     private async _resolveSessionIdImpl(entry: SessionEntry): Promise<string | undefined> {
-        // Task terminals don't have a named session to resolve
         if (entry.task) { return undefined; }
+        return await this._resolveFromStateFile(entry)
+            ?? await this._resolveFromCache(entry)
+            ?? await this._resolveFromScan(entry);
+    }
 
-        // Fast path: check if state-tracker.py has written session_id to the state file
+    private async _resolveFromStateFile(entry: SessionEntry): Promise<string | undefined> {
         try {
             const stateFile = path.join(STATE_DIR, `${entry.claudeFile}.json`);
             const raw = await fs.promises.readFile(stateFile, 'utf-8');
             const state = safeJsonParse<{ session_id?: string }>(raw);
-            if (state?.session_id) {
-                const logPath = getSessionLogPath(entry.dir, state.session_id);
-                try {
-                    const stat = await fs.promises.stat(logPath);
-                    entry.sessionId = state.session_id;
-                    entry.logPath = logPath;
-                    entry.lastActive = stat.mtime;
-                    await this.persist();
-                    return state.session_id;
-                } catch {
-                    /* expected: JSONL for that session_id doesn't exist yet */
-                }
-            }
+            if (!state?.session_id) { return undefined; }
+            const logPath = getSessionLogPath(entry.dir, state.session_id);
+            const stat = await fs.promises.stat(logPath);
+            entry.sessionId = state.session_id;
+            entry.logPath = logPath;
+            entry.lastActive = stat.mtime;
+            await this.persist();
+            return state.session_id;
         } catch {
-            /* expected: state file doesn't exist or isn't readable */
+            return undefined; /* expected: state file or JSONL doesn't exist */
         }
+    }
 
-        // Check globalState cache
+    private async _resolveFromCache(entry: SessionEntry): Promise<string | undefined> {
         const persisted = this._globalState.get<Record<string, string>>(REGISTRY_PERSISTENCE_KEY, {});
         const cached = persisted[entry.filePath];
-        if (cached) {
+        if (!cached) { return undefined; }
+        try {
             const logPath = getSessionLogPath(entry.dir, cached);
-            try {
-                const stat = await fs.promises.stat(logPath);
-                entry.sessionId = cached;
-                entry.logPath = logPath;
-                entry.lastActive = stat.mtime;
-                return cached;
-            } catch {
-                /* expected: cached JSONL no longer exists, fall through to scan */
-            }
+            const stat = await fs.promises.stat(logPath);
+            entry.sessionId = cached;
+            entry.logPath = logPath;
+            entry.lastActive = stat.mtime;
+            return cached;
+        } catch {
+            return undefined; /* expected: cached JSONL no longer exists */
         }
+    }
 
-        // Expensive full scan
+    private async _resolveFromScan(entry: SessionEntry): Promise<string | undefined> {
         const sessionId = await scanForSession(entry.dir, entry.claudeFile);
-        if (sessionId) {
-            entry.sessionId = sessionId;
-            entry.logPath = getSessionLogPath(entry.dir, sessionId);
-            try {
-                entry.lastActive = (await fs.promises.stat(entry.logPath)).mtime;
-            } catch {
-                /* expected: log file might not exist yet */
-            }
-            await this.persist();
+        if (!sessionId) { return undefined; }
+        entry.sessionId = sessionId;
+        entry.logPath = getSessionLogPath(entry.dir, sessionId);
+        try {
+            entry.lastActive = (await fs.promises.stat(entry.logPath)).mtime;
+        } catch {
+            /* expected: log file might not exist yet */
         }
+        await this.persist();
         return sessionId;
     }
 

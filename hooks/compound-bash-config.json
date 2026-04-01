@@ -1,0 +1,7 @@
+{
+  "scan_directories": ["~"],
+  "auto_add_target": "~/.claude/settings.json",
+  "max_scan_depth": 5,
+  "pipe_commands_require_rules": false,
+  "debug": false
+}

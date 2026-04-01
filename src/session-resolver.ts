@@ -15,7 +15,9 @@ export async function scanForSession(cwd: string, claudeFileName: string): Promi
         return undefined; /* expected: project dir may not exist */
     }
 
-    const needle = `Session renamed to: \\"${claudeFileName}\\"`;
+    // Use the <local-command-stdout> wrapper to avoid false positives from
+    // assistant messages that discuss/quote the rename pattern in code snippets.
+    const needle = `<local-command-stdout>Session renamed to: \\"${claudeFileName}\\"</local-command-stdout>`;
     const matches: { sessionId: string; mtime: number }[] = [];
 
     let files: string[];

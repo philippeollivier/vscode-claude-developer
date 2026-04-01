@@ -8,6 +8,8 @@ import { TAIL_CHUNK_SIZE, SUBAGENT_ACTIVE_THRESHOLD_MS } from './constants';
 import { safeJsonParse } from './utils';
 
 const subagentCache = new Map<string, SubagentCacheEntry>();
+const MAX_SUBAGENT_CACHE_SIZE = 100;
+const BG_AGENT_ID_REGEX = /agentId:\s*(\w+)/;
 
 export async function readTailChunk(logPath: string, chunkSize: number): Promise<string[]> {
     const fh = await fs.promises.open(logPath, 'r');
@@ -118,7 +120,7 @@ function extractAgentData(content: string): ParsedAgentData {
                 if (block?.type === 'tool_result' && block.tool_use_id) {
                     resultIds.add(block.tool_use_id);
                     const text = extractToolResultText(block);
-                    const match = text.match(/Async agent launched[\s\S]*?agentId: (\w+)/);
+                    const match = text.match(BG_AGENT_ID_REGEX);
                     if (match) {
                         bgAgentIds.set(block.tool_use_id, match[1]);
                     }
@@ -198,15 +200,22 @@ export async function parseSubagents(logPath: string): Promise<SubagentInfo[]> {
     const result = await Promise.all(
         agentUses.map(async (a): Promise<SubagentInfo> => {
             const running = await isAgentRunning(a, resultIds, bgAgentIds, subagentsDir, now);
+            const agentId = a.background ? bgAgentIds.get(a.id) : undefined;
+            const agentLogPath = agentId ? path.join(subagentsDir, `agent-${agentId}.jsonl`) : undefined;
             return {
                 id: a.id,
                 description: a.description,
                 subagentType: a.subagentType,
                 running,
+                logPath: agentLogPath,
             };
         }),
     );
 
+    if (subagentCache.size >= MAX_SUBAGENT_CACHE_SIZE) {
+        const firstKey = subagentCache.keys().next().value;
+        if (firstKey) { subagentCache.delete(firstKey); }
+    }
     subagentCache.set(logPath, { mtimeMs: stat.mtimeMs, size: stat.size, result });
     return result;
 }
