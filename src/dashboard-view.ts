@@ -1,5 +1,5 @@
 import * as path from 'path';
-import { SessionInfo, SubagentInfo } from './types';
+import { SessionInfo, SubagentInfo, SetupStatus } from './types';
 import { escapeHtml, renderMarkdown, timeAgo, getForkBase, escapePathForJs, isForkName } from './utils';
 import { statusLabel } from './state';
 
@@ -37,9 +37,11 @@ function renderSessionCard(s: SessionInfo, summaries: Map<string, string>, subag
     const runningAgents = agents.filter(a => a.running);
     let agentsHtml = '';
     if (runningAgents.length > 0) {
-        const runningRows = runningAgents.map(a =>
-            `<div class="agent-row agent-running"><span class="agent-dot running"></span><span class="agent-desc">${escapeHtml(a.description)}</span><span class="agent-type">${escapeHtml(a.subagentType)}</span></div>`
-        ).join('');
+        const runningRows = runningAgents.map(a => {
+            const escapedLogPath = a.logPath ? escapePathForJs(a.logPath) : '';
+            const clickable = a.logPath ? ` agent-clickable" onclick="event.stopPropagation(); toggleAgent(this, '${escapedLogPath}')` : '"';
+            return `<div class="agent-row agent-running${clickable}><span class="agent-dot running"></span><span class="agent-desc">${escapeHtml(a.description)}</span><span class="agent-type">${escapeHtml(a.subagentType)}</span></div>`;
+        }).join('');
         agentsHtml = `<div class="agents-section">
             <div class="agents-label">${runningAgents.length} agent${runningAgents.length > 1 ? 's' : ''} running</div>
             ${runningRows}
@@ -73,7 +75,7 @@ function renderTaskCardInternal(s: SessionInfo, groupColor: string): string {
     const labelText = timeText ? `Task \u00b7 ${timeText}` : 'Task';
 
     return `
-            <div class="card task-card" style="${groupColor ? `border-left: 3px dashed ${groupColor};` : ''}" onclick="vscode.postMessage({command:'revealTaskTerminal', taskId:'${escapedId}'})" title="Click to reveal terminal">
+            <div class="card task-card" data-task-id="${escapedId}" style="${groupColor ? `border-left: 3px dashed ${groupColor};` : ''}" onclick="vscode.postMessage({command:'revealTaskTerminal', taskId:'${escapedId}'})" title="Click to reveal terminal">
                 <div class="card-header">
                     <div class="card-title">
                         <span class="status-label status-task">${escapeHtml(labelText)}</span>
@@ -180,5 +182,38 @@ export function getCardsHtml(sessions: SessionInfo[], summaries: Map<string, str
         </div>`;
     }
 
-    return body || '<p class="empty">No open .claude files found.</p>';
+    // "New Section" button at the bottom
+    body += `<div class="new-section-row">
+        <button class="new-section-btn" onclick="vscode.postMessage({command:'createSection'})">+ New Section</button>
+    </div>`;
+
+    return body || '<p class="empty">No open .claude files found.<br><button class="new-section-btn" onclick="vscode.postMessage({command:\'createSection\'})">+ New Section</button></p>';
+}
+
+export function renderHealthCheck(status: SetupStatus): string {
+    const dot = (ok: boolean, optional: boolean) => {
+        if (ok) {
+            return '<span class="health-indicator health-ok">●</span>';
+        }
+        return optional
+            ? '<span class="health-indicator health-warn">●</span>'
+            : '<span class="health-indicator health-err">●</span>';
+    };
+
+    let html = '';
+    html += `<div class="health-row">${dot(status.hooksInstalled, false)} Hook scripts installed</div>`;
+    html += `<div class="health-row">${dot(status.settingsConfigured, false)} Settings.json configured</div>`;
+    html += `<div class="health-row">${dot(status.dependencies.python3, false)} python3</div>`;
+    html += `<div class="health-row">${dot(status.dependencies.jq, true)} jq <span style="opacity:0.6">(optional, for audit logging)</span></div>`;
+    html += `<div class="health-row">${dot(status.dependencies.terminalNotifier, true)} terminal-notifier <span style="opacity:0.6">(optional, for click-to-navigate notifications)</span></div>`;
+
+    const allOk = status.hooksInstalled && status.settingsConfigured && status.dependencies.python3;
+    if (!allOk) {
+        html += `<button class="configure-btn" onclick="vscode.postMessage({command:'configureHooks'})">Configure Hooks</button>`;
+    }
+    if (status.needsUpdate) {
+        html += `<button class="configure-btn" onclick="vscode.postMessage({command:'configureHooks'})">Update Hooks</button>`;
+    }
+
+    return html;
 }

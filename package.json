@@ -54,6 +54,11 @@
         "command": "tabTerminal.runTask",
         "title": "Run Task",
         "category": "Claude Developer"
+      },
+      {
+        "command": "tabTerminal.configureHooks",
+        "title": "Configure Hooks",
+        "category": "Claude Developer"
       }
     ],
     "keybindings": [
@@ -78,7 +83,10 @@
         },
         "tabTerminal.terminalLocation": {
           "type": "string",
-          "enum": ["right", "below"],
+          "enum": [
+            "right",
+            "below"
+          ],
           "default": "right",
           "description": "Where to place the terminal relative to the editor"
         },
@@ -94,8 +102,13 @@
         },
         "tabTerminal.skills": {
           "type": "array",
-          "items": { "type": "string" },
-          "default": ["/summarize-and-move-to-archive", "/update-worklog"],
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "/summarize-and-move-to-archive",
+            "/update-worklog"
+          ],
           "description": "Slash commands available in the dashboard right-click menu"
         }
       }
@@ -103,7 +116,7 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./ && cp -r out package.json claude-icon.svg ~/.vscode/extensions/undefined_publisher.claude-developer-0.0.1/",
+    "compile": "tsc -p ./ && cp -r out hooks package.json claude-icon.svg ~/.vscode/extensions/undefined_publisher.claude-developer-0.0.1/",
     "watch": "tsc -watch -p ./",
     "lint": "eslint src --ext ts"
   },

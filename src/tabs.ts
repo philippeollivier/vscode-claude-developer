@@ -92,11 +92,3 @@ export async function getOpenClaudeFiles(): Promise<SessionInfo[]> {
 
     return [...fileSessions, ...taskSessions];
 }
-
-export function getOpenClaudeFileNames(): Set<string> {
-    const names = new Set<string>();
-    forEachClaudeTab((_uri, fsPath) => {
-        names.add(path.basename(fsPath, '.claude'));
-    });
-    return names;
-}

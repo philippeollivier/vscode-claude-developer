@@ -13,7 +13,8 @@ export function getDashboardCss(): string {
         .status-task { background: rgba(110, 200, 160, 0.15); color: #6ec8a0; }
         .add-btn:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground); }
         .card { background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 14px 16px; margin-bottom: 6px; cursor: pointer; transition: border-color 0.15s, background 0.15s; }
-        .card:hover { border-color: var(--vscode-focusBorder); background: var(--vscode-list-hoverBackground); }
+        body:not(.keyboard-nav) .card:hover, .card.selected { border-color: var(--vscode-focusBorder); background: var(--vscode-list-hoverBackground); }
+        body:not(.keyboard-nav) .card:hover .card-btn, .card.selected .card-btn { opacity: 1; }
         .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
         .card-title { display: flex; align-items: center; gap: 8px; }
         .card-title h2 { margin: 0; font-size: 14px; font-weight: 600; }
@@ -36,6 +37,11 @@ export function getDashboardCss(): string {
         .agents-section { margin-top: 8px; border-top: 1px solid var(--vscode-panel-border); padding-top: 6px; }
         .agents-label { font-size: 9px; color: var(--vscode-descriptionForeground); text-transform: uppercase; letter-spacing: 0.3px; margin-bottom: 4px; }
         .agent-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; font-size: 10px; }
+        .agent-clickable { cursor: pointer; border-radius: 3px; padding: 2px 4px; margin: 0 -4px; }
+        .agent-clickable:hover { background: var(--vscode-list-hoverBackground); }
+        .agent-content { margin: 4px 0 4px 12px; padding: 6px 8px; background: var(--vscode-textCodeBlock-background, rgba(255,255,255,0.04)); border-radius: 4px; border-left: 2px solid #4ec9b0; font-size: 10px; font-family: var(--vscode-editor-font-family); line-height: 1.4; color: var(--vscode-descriptionForeground); max-height: 200px; overflow-y: auto; }
+        .agent-content .tail-line { white-space: pre-wrap; word-break: break-word; }
+        .agent-content .tail-user { color: var(--vscode-foreground); }
         .agent-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
         .agent-dot.running { background: #4ec9b0; animation: pulse 1.5s ease-in-out infinite; }
         .agent-desc { color: var(--vscode-foreground); flex: 1; }
@@ -72,5 +78,12 @@ export function getDashboardCss(): string {
         .context-menu-item-danger { color: #e5534b; }
         .context-menu-item-danger:hover { background: rgba(229,83,75,0.15); color: #e5534b; }
         .context-menu-separator { height: 1px; background: var(--vscode-menu-separatorBackground, var(--vscode-panel-border)); margin: 4px 0; }
+        .health-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 12px; }
+        .health-indicator { font-size: 10px; }
+        .health-ok { color: #3bb44a; }
+        .health-err { color: #e5534b; }
+        .health-warn { color: #e09b13; }
+        .configure-btn { margin-top: 8px; padding: 4px 12px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
+        .configure-btn:hover { background: var(--vscode-button-hoverBackground); }
     `;
 }

@@ -198,11 +198,14 @@ export async function parseSubagents(logPath: string): Promise<SubagentInfo[]> {
     const result = await Promise.all(
         agentUses.map(async (a): Promise<SubagentInfo> => {
             const running = await isAgentRunning(a, resultIds, bgAgentIds, subagentsDir, now);
+            const agentId = a.background ? bgAgentIds.get(a.id) : undefined;
+            const agentLogPath = agentId ? path.join(subagentsDir, `agent-${agentId}.jsonl`) : undefined;
             return {
                 id: a.id,
                 description: a.description,
                 subagentType: a.subagentType,
                 running,
+                logPath: agentLogPath,
             };
         }),
     );

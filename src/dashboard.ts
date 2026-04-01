@@ -2,17 +2,18 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
-import { SessionInfo, SubagentInfo, DashboardSettings } from './types';
-import { escapeHtml } from './utils';
+import { SessionInfo, SubagentInfo, DashboardSettings, SetupStatus } from './types';
+import { escapeHtml, renderMarkdown } from './utils';
 import { getOpenClaudeFiles, findTabsByUri } from './tabs';
 import { getConfig } from './config';
 import { tailSessionMessages, parseSubagents } from './session';
 import { setDashboardCallbacks } from './state';
 import { closeTerminalForEditor, forkSession, openTaskTerminal, withSyncGuard } from './terminal';
+import { checkSetupStatus } from './setup';
 import { getRegistry } from './registry';
 import { DASHBOARD_REFRESH_INTERVAL_MS, CONFIG_NAMESPACE } from './constants';
 import { getDashboardCss } from './dashboard-styles';
-import { getCardsHtml, renderToggleSetting, renderSelectSetting } from './dashboard-view';
+import { getCardsHtml, renderToggleSetting, renderSelectSetting, renderHealthCheck } from './dashboard-view';
 
 export let dashboardPanel: vscode.WebviewPanel | undefined;
 export let extensionContext: vscode.ExtensionContext | undefined;
@@ -42,7 +43,7 @@ export function setExtensionContext(ctx: vscode.ExtensionContext): void {
     extensionContext = ctx;
 }
 
-export function getDashboardHtml(sessions: SessionInfo[], summaries: Map<string, string>, settings: DashboardSettings, subagents: Map<string, SubagentInfo[]> = new Map()): string {
+export function getDashboardHtml(sessions: SessionInfo[], summaries: Map<string, string>, settings: DashboardSettings, subagents: Map<string, SubagentInfo[]> = new Map(), setupStatus?: SetupStatus): string {
     const body = getCardsHtml(sessions, summaries, subagents);
 
     return `<!DOCTYPE html>
@@ -61,6 +62,10 @@ export function getDashboardHtml(sessions: SessionInfo[], summaries: Map<string,
             <span>Settings & Hotkeys</span>
         </div>
         <div class="settings-body" id="settingsBody">
+            <div class="settings-section">
+                <h3>Setup Status</h3>
+                ${setupStatus ? renderHealthCheck(setupStatus) : '<div class="health-row">Loading...</div>'}
+            </div>
             <div class="settings-section">
                 <h3>Settings</h3>
                 ${renderToggleSetting('Auto-open terminal', 'Open a paired terminal when switching to a .claude tab', `${CONFIG_NAMESPACE}.autoOpenTerminal`, settings.autoOpenTerminal)}
@@ -185,6 +190,121 @@ export function getDashboardHtml(sessions: SessionInfo[], summaries: Map<string,
         }
 
         document.addEventListener('click', dismissCardMenu);
+
+        // Agent chain of thought viewer
+        function toggleAgent(row, logPath) {
+            const existing = row.nextElementSibling;
+            if (existing && existing.classList.contains('agent-content')) {
+                existing.remove();
+                return;
+            }
+            const container = document.createElement('div');
+            container.className = 'agent-content';
+            container.dataset.logPath = logPath;
+            container.textContent = 'Loading...';
+            row.after(container);
+            vscode.postMessage({ command: 'expandAgent', logPath: logPath });
+        }
+
+        window.addEventListener('message', event => {
+            const msg = event.data;
+            if (msg.command === 'agentContent' && msg.logPath) {
+                const containers = document.querySelectorAll('.agent-content');
+                for (const c of containers) {
+                    if (c.dataset.logPath === msg.logPath) {
+                        c.innerHTML = msg.html || '<em>No messages yet</em>';
+                    }
+                }
+            }
+        });
+
+        // Keyboard navigation
+        let selectedIndex = -1;
+        let hoveredIndex = -1;
+
+        function getCards() {
+            return Array.from(document.querySelectorAll('#content .card'));
+        }
+
+        function selectCard(index) {
+            const cards = getCards();
+            if (cards.length === 0) return;
+            cards.forEach(c => c.classList.remove('selected'));
+            if (index < 0) index = 0;
+            if (index >= cards.length) index = cards.length - 1;
+            selectedIndex = index;
+            cards[selectedIndex].classList.add('selected');
+            cards[selectedIndex].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        }
+
+        // Track mouse hover so keyboard nav starts from hovered card
+        document.addEventListener('mouseover', (e) => {
+            const card = e.target.closest('.card');
+            if (card) {
+                const cards = getCards();
+                hoveredIndex = cards.indexOf(card);
+            }
+        });
+
+        // Mouse movement exits keyboard mode and clears keyboard selection
+        document.addEventListener('mousemove', () => {
+            if (document.body.classList.contains('keyboard-nav')) {
+                document.body.classList.remove('keyboard-nav');
+                getCards().forEach(c => c.classList.remove('selected'));
+                selectedIndex = -1;
+            }
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (activeMenu) return;
+            if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
+
+            const cards = getCards();
+            if (cards.length === 0) return;
+
+            if (e.key === 'ArrowDown' || e.key === 'j') {
+                e.preventDefault();
+                document.body.classList.add('keyboard-nav');
+                if (selectedIndex < 0 && hoveredIndex >= 0) {
+                    selectCard(hoveredIndex);
+                } else {
+                    selectCard(selectedIndex + 1);
+                }
+            } else if (e.key === 'ArrowUp' || e.key === 'k') {
+                e.preventDefault();
+                document.body.classList.add('keyboard-nav');
+                if (selectedIndex < 0 && hoveredIndex >= 0) {
+                    selectCard(hoveredIndex);
+                } else {
+                    selectCard(selectedIndex - 1);
+                }
+            } else if (e.key === 'Escape') {
+                document.body.classList.remove('keyboard-nav');
+                cards.forEach(c => c.classList.remove('selected'));
+                selectedIndex = -1;
+            } else if (e.key === 'Enter' && selectedIndex >= 0 && selectedIndex < cards.length) {
+                e.preventDefault();
+                const card = cards[selectedIndex];
+                const taskId = card.dataset.taskId;
+                const cardPath = card.dataset.path;
+                if (taskId) {
+                    vscode.postMessage({ command: 'revealTaskTerminal', taskId: taskId });
+                } else if (cardPath) {
+                    if (e.metaKey) {
+                        vscode.postMessage({ command: 'revealTerminal', path: cardPath });
+                    } else {
+                        vscode.postMessage({ command: 'open', path: cardPath });
+                    }
+                }
+            }
+        });
+
+        // Preserve selection across content updates
+        window.addEventListener('message', event => {
+            if (event.data.command === 'updateContent' && selectedIndex >= 0) {
+                setTimeout(() => selectCard(selectedIndex), 0);
+            }
+        });
 
         function showTaskPicker(e, dir) {
             e.preventDefault();
@@ -320,7 +440,8 @@ export async function refreshDashboard(): Promise<void> {
             html: getCardsHtml(sessions, summaries, subagentMap),
         });
     } else {
-        dashboardPanel.webview.html = getDashboardHtml(sessions, summaries, getConfig(), subagentMap);
+        const setupStatus = extensionContext ? await checkSetupStatus(extensionContext) : undefined;
+        dashboardPanel.webview.html = getDashboardHtml(sessions, summaries, getConfig(), subagentMap, setupStatus);
         canPostMessage = true;
     }
 }
@@ -514,6 +635,32 @@ export async function openDashboard(): Promise<void> {
                 const entry = getRegistry().get(msg.taskId as string);
                 if (entry?.terminal) {
                     withSyncGuard(() => entry.terminal!.show(false));
+                }
+            }
+
+            if (msg.command === 'configureHooks') {
+                vscode.commands.executeCommand('tabTerminal.configureHooks');
+            }
+
+            if (msg.command === 'expandAgent' && msg.logPath) {
+                try {
+                    const lines = await tailSessionMessages(msg.logPath as string, 8);
+                    const html = lines.map(l => {
+                        const isUser = l.startsWith('>');
+                        const rendered = renderMarkdown(escapeHtml(l));
+                        return `<div class="tail-line ${isUser ? 'tail-user' : ''}">${rendered}</div>`;
+                    }).join('');
+                    dashboardPanel?.webview.postMessage({
+                        command: 'agentContent',
+                        logPath: msg.logPath,
+                        html: html || '<em>No messages yet</em>',
+                    });
+                } catch {
+                    dashboardPanel?.webview.postMessage({
+                        command: 'agentContent',
+                        logPath: msg.logPath,
+                        html: '<em>Could not read agent log</em>',
+                    });
                 }
             }
 

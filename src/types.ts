@@ -19,6 +19,7 @@ export interface SubagentInfo {
     description: string;
     subagentType: string;
     running: boolean;
+    logPath?: string;
 }
 
 export interface TaskInfo {
@@ -96,20 +97,17 @@ export interface ParsedAgentData {
     bgAgentIds: Map<string, string>;
 }
 
-export type DashboardMessage =
-    | { command: 'refresh' }
-    | { command: 'open'; path: string }
-    | { command: 'revealTerminal'; path: string }
-    | { command: 'setting'; key: string; value: unknown }
-    | { command: 'fork'; path: string }
-    | { command: 'close'; path: string }
-    | { command: 'create'; dir: string }
-    | { command: 'sendMessage'; path: string }
-    | { command: 'sendSkill'; path: string; skill: string }
-    | { command: 'delete'; path: string }
-    | { command: 'runTask'; dir: string; skill: string }
-    | { command: 'addTaskCommand'; dir: string }
-    | { command: 'revealTaskTerminal'; taskId: string }
-    | { command: 'closeTask'; taskId: string };
-
 export const STATE_DIR = path.join(os.homedir(), '.claude', 'hooks', 'state');
+
+export interface SetupStatus {
+    hooksInstalled: boolean;
+    missingHookFiles: string[];
+    settingsConfigured: boolean;
+    hooksVersion: number | undefined;
+    needsUpdate: boolean;
+    dependencies: {
+        python3: boolean;
+        jq: boolean;
+        terminalNotifier: boolean;
+    };
+}

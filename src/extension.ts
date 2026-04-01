@@ -27,6 +27,7 @@ import {
     dashboardPanel,
     stopDashboardAutoRefresh,
 } from './dashboard';
+import { checkAndPromptSetup, runSetup } from './setup';
 
 let goToNotificationIndex = 0;
 
@@ -287,9 +288,24 @@ export function activate(context: vscode.ExtensionContext) {
     startGlobalStateWatcher();
     updateStatusBar();
 
+    // Non-blocking: check if hooks need setup/update
+    checkAndPromptSetup(context);
+
     const dashboardCommand = vscode.commands.registerCommand(
         'tabTerminal.openDashboard',
         () => openDashboard()
+    );
+
+    const configureHooksCommand = vscode.commands.registerCommand(
+        'tabTerminal.configureHooks',
+        async () => {
+            const result = await runSetup(context);
+            if (result.success) {
+                vscode.window.showInformationMessage(`Claude Developer: ${result.message}`);
+            } else {
+                vscode.window.showErrorMessage(`Claude Developer: ${result.message}`);
+            }
+        }
     );
 
     const goToNotificationCommand = vscode.commands.registerCommand(
@@ -328,6 +344,7 @@ export function activate(context: vscode.ExtensionContext) {
         closeNonClaudeCommand,
         dashboardCommand,
         goToNotificationCommand,
+        configureHooksCommand,
         editorChangeListener,
         terminalChangeListener,
         tabCloseListener,

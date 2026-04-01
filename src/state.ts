@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { HookState, STATE_DIR } from './types';
-import { STATE_STALE_THRESHOLD_S, STATE_TOOL_STALE_THRESHOLD_S, STATE_WATCHER_DEBOUNCE_MS } from './constants';
+import { STATE_WATCHER_DEBOUNCE_MS } from './constants';
 import { safeJsonParse, ensureDirectoryExists } from './utils';
 import { getRegistry } from './registry';
 
@@ -38,29 +38,16 @@ export function setDashboardCallbacks(
 
 const ATTENTION_TYPES = new Set(['permission_prompt', 'idle_prompt', 'error']);
 
-function getStaleThreshold(type: string): number {
-    switch (type) {
-        case 'stopped':
-        case 'error':
-            return Infinity;
-        case 'executing_tool':
-        case 'processing':
-            return STATE_TOOL_STALE_THRESHOLD_S;
-        default:
-            return STATE_STALE_THRESHOLD_S;
-    }
-}
-
 export function readHookState(claudeFile: string, sessionMtime?: Date): HookState | undefined {
     try {
         const stateFile = path.join(STATE_DIR, `${claudeFile}.json`);
         if (!fs.existsSync(stateFile)) { return undefined; }
         const state = safeJsonParse<HookState>(fs.readFileSync(stateFile, 'utf-8'));
         if (!state) { return undefined; }
-        const age = Date.now() / 1000 - state.timestamp;
-        const threshold = getStaleThreshold(state.type);
-        if (threshold !== Infinity && age > threshold) { return undefined; }
-        if (sessionMtime && sessionMtime.getTime() / 1000 > state.timestamp + 2) { return undefined; }
+        // For notification states, if the session log was modified after the notification,
+        // the agent resumed and the notification is stale.
+        const NOTIFICATION_TYPES = ['permission_prompt', 'idle_prompt'];
+        if (NOTIFICATION_TYPES.includes(state.type) && sessionMtime && sessionMtime.getTime() / 1000 > state.timestamp + 2) { return undefined; }
         return state;
     } catch {
         return undefined;
@@ -90,6 +77,7 @@ export function statusLabel(state: HookState | undefined): { text: string; cssCl
         }
         case 'processing': return { text: 'Processing', cssClass: 'status-processing' };
         case 'stopped': return { text: 'Done', cssClass: 'status-done' };
+        case 'idle': return { text: 'Idle', cssClass: 'status-done' };
         default: return { text: state.type, cssClass: 'status-other' };
     }
 }
