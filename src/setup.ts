@@ -257,6 +257,29 @@ function extractBasename(command: string): string {
     return path.basename(parts[0]);
 }
 
+/** Find an existing hook entry by script basename and update it, or append to a matching group. */
+function addOrUpdateHook(groups: MatcherGroup[], matcher: string, hook: HookEntry): void {
+    const basename = extractBasename(hook.command);
+
+    // Check if this script already exists in any group — update path if so
+    for (const group of groups) {
+        for (let i = 0; i < group.hooks.length; i++) {
+            if (extractBasename(group.hooks[i].command) === basename) {
+                group.hooks[i] = { ...group.hooks[i], command: hook.command };
+                return;
+            }
+        }
+    }
+
+    // Not found — append to existing group with same matcher, or create new
+    const target = groups.find(g => g.matcher === matcher);
+    if (target) {
+        target.hooks.push(hook);
+    } else {
+        groups.push({ matcher, hooks: [hook] });
+    }
+}
+
 export async function mergeHooksConfig(): Promise<void> {
     const filePath = settingsPath();
 
@@ -276,49 +299,16 @@ export async function mergeHooksConfig(): Promise<void> {
     const requiredHooks = buildRequiredHooksConfig();
 
     for (const [eventType, requiredGroups] of Object.entries(requiredHooks)) {
-        const existingGroups: MatcherGroup[] = existingHooks[eventType] || [];
-
+        if (!existingHooks[eventType]) {
+            existingHooks[eventType] = requiredGroups;
+            continue;
+        }
+        const existingGroups = existingHooks[eventType];
         for (const reqGroup of requiredGroups) {
             for (const reqHook of reqGroup.hooks) {
-                const reqBasename = extractBasename(reqHook.command);
-
-                // Search across all existing groups for this event to find if this script is already present
-                let found = false;
-                for (const existGroup of existingGroups) {
-                    for (let i = 0; i < existGroup.hooks.length; i++) {
-                        const existBasename = extractBasename(existGroup.hooks[i].command);
-                        if (existBasename === reqBasename) {
-                            // Update the command path in place
-                            existGroup.hooks[i] = { ...existGroup.hooks[i], command: reqHook.command };
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (found) { break; }
-                }
-
-                if (!found) {
-                    // Find an existing group that already has hooks from the same required group
-                    let targetGroup = existingGroups.find(
-                        g => g.matcher === reqGroup.matcher &&
-                            reqGroup.hooks.some(rh => {
-                                const rb = extractBasename(rh.command);
-                                return g.hooks.some(eh => extractBasename(eh.command) === rb);
-                            }),
-                    );
-
-                    if (!targetGroup) {
-                        // Create a new group
-                        targetGroup = { matcher: reqGroup.matcher, hooks: [] };
-                        existingGroups.push(targetGroup);
-                    }
-
-                    targetGroup.hooks.push(reqHook);
-                }
+                addOrUpdateHook(existingGroups, reqGroup.matcher, reqHook);
             }
         }
-
-        existingHooks[eventType] = existingGroups;
     }
 
     settings.hooks = existingHooks;

@@ -44,6 +44,32 @@ export function withSyncGuard(fn: () => void | PromiseLike<unknown>, delay: numb
 
 // ── Terminal management ──────────────────────────────────────────────────────
 
+/** Create a terminal with standard config (icon, location, show + move). */
+function createManagedTerminal(
+    name: string,
+    cwd: string,
+    context: vscode.ExtensionContext,
+    env?: Record<string, string>,
+): vscode.Terminal {
+    const config = getConfig();
+    const terminal = vscode.window.createTerminal({
+        name,
+        cwd,
+        iconPath: vscode.Uri.joinPath(context.extensionUri, CLAUDE_ICON_FILE),
+        env,
+        location: config.terminalLocation === 'right'
+            ? vscode.TerminalLocation.Editor
+            : vscode.TerminalLocation.Panel,
+    });
+    if (config.terminalLocation === 'right') {
+        terminal.show(true);
+        vscode.commands.executeCommand('workbench.action.moveEditorToRightGroup');
+    } else {
+        terminal.show(true);
+    }
+    return terminal;
+}
+
 export async function openTerminalForEditor(
     editor: vscode.TextEditor,
     context: vscode.ExtensionContext,
@@ -59,39 +85,14 @@ export async function openTerminalForEditor(
         return;
     }
 
-    const location = getConfig().terminalLocation;
     const fileDir = path.dirname(filePath);
     const fileName = path.basename(filePath);
     const isClaudeDoc = isClaudeFile(filePath);
     const displayName = isClaudeDoc ? path.basename(filePath, '.claude') : fileName;
+    const env = isClaudeDoc ? { CLAUDE_FILE: displayName } : undefined;
 
-    const iconPath = isClaudeDoc
-        ? vscode.Uri.joinPath(context.extensionUri, CLAUDE_ICON_FILE)
-        : undefined;
-
-    const env = isClaudeDoc
-        ? { CLAUDE_FILE: path.basename(filePath, '.claude') }
-        : undefined;
-
-    const terminal = vscode.window.createTerminal({
-        name: displayName,
-        cwd: fileDir,
-        iconPath,
-        env,
-        location: location === 'right'
-            ? vscode.TerminalLocation.Editor
-            : vscode.TerminalLocation.Panel
-    });
-
-    // Register in the session registry
+    const terminal = createManagedTerminal(displayName, fileDir, context, env);
     await registry.register(filePath, terminal);
-
-    if (location === 'right') {
-        terminal.show(true);
-        vscode.commands.executeCommand('workbench.action.moveEditorToRightGroup');
-    } else {
-        terminal.show(true);
-    }
 
     // Auto-start claude for .claude files
     if (isClaudeDoc) {
@@ -149,26 +150,10 @@ export async function openTaskTerminal(
     context: vscode.ExtensionContext,
 ): Promise<void> {
     const registry = getRegistry();
-    const config = getConfig();
     const displayName = `${TASK_NAME_PREFIX}${skill.replace(/^\//, '')}`;
 
-    const terminal = vscode.window.createTerminal({
-        name: displayName,
-        cwd: dir,
-        iconPath: vscode.Uri.joinPath(context.extensionUri, CLAUDE_ICON_FILE),
-        location: config.terminalLocation === 'right'
-            ? vscode.TerminalLocation.Editor
-            : vscode.TerminalLocation.Panel,
-    });
-
+    const terminal = createManagedTerminal(displayName, dir, context);
     registry.registerTask(dir, skill, terminal);
-
-    if (config.terminalLocation === 'right') {
-        terminal.show(true);
-        vscode.commands.executeCommand('workbench.action.moveEditorToRightGroup');
-    } else {
-        terminal.show(true);
-    }
 
     const skillCmd = skill.startsWith('/') ? skill : `/${skill}`;
     terminal.sendText(`{ echo '${skillCmd}'; exec < /dev/tty; } | claude`);

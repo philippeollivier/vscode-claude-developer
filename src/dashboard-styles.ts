@@ -48,6 +48,9 @@ export function getDashboardCss(): string {
         .agent-type { color: var(--vscode-descriptionForeground); font-size: 9px; background: var(--vscode-textCodeBlock-background, rgba(255,255,255,0.06)); padding: 1px 5px; border-radius: 3px; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
         .empty { color: var(--vscode-descriptionForeground); font-style: italic; margin-top: 20px; }
+        .new-section-row { margin-top: 12px; }
+        .new-section-btn { background: none; border: 1px dashed var(--vscode-panel-border); color: var(--vscode-descriptionForeground); padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 12px; width: 100%; transition: border-color 0.15s, color 0.15s; }
+        .new-section-btn:hover { border-color: var(--vscode-focusBorder); color: var(--vscode-foreground); }
         .settings-panel { margin-top: 32px; border-top: 1px solid var(--vscode-panel-border); }
         .settings-toggle { display: flex; align-items: center; gap: 6px; padding: 10px 0; cursor: pointer; color: var(--vscode-descriptionForeground); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; user-select: none; }
         .settings-toggle:hover { color: var(--vscode-foreground); }

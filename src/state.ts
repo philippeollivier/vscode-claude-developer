@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { HookState, STATE_DIR } from './types';
-import { STATE_WATCHER_DEBOUNCE_MS } from './constants';
+import { STATE_WATCHER_DEBOUNCE_MS, StatusType } from './constants';
 import { safeJsonParse, ensureDirectoryExists } from './utils';
 import { getRegistry } from './registry';
 
@@ -36,7 +36,8 @@ export function setDashboardCallbacks(
 
 // ── Hook state helpers ───────────────────────────────────────────────────────
 
-const ATTENTION_TYPES = new Set(['permission_prompt', 'idle_prompt', 'error']);
+const ATTENTION_TYPES: Set<string> = new Set([StatusType.PERMISSION_PROMPT, StatusType.IDLE_PROMPT, StatusType.ERROR]);
+const NOTIFICATION_TYPES: Set<string> = new Set([StatusType.PERMISSION_PROMPT, StatusType.IDLE_PROMPT]);
 
 export function readHookState(claudeFile: string, sessionMtime?: Date): HookState | undefined {
     try {
@@ -46,8 +47,7 @@ export function readHookState(claudeFile: string, sessionMtime?: Date): HookStat
         if (!state) { return undefined; }
         // For notification states, if the session log was modified after the notification,
         // the agent resumed and the notification is stale.
-        const NOTIFICATION_TYPES = ['permission_prompt', 'idle_prompt'];
-        if (NOTIFICATION_TYPES.includes(state.type) && sessionMtime && sessionMtime.getTime() / 1000 > state.timestamp + 2) { return undefined; }
+        if (NOTIFICATION_TYPES.has(state.type) && sessionMtime && sessionMtime.getTime() / 1000 > state.timestamp + 2) { return undefined; }
         return state;
     } catch {
         return undefined;
@@ -68,16 +68,16 @@ export const statusColors: Record<string, string> = {
 export function statusLabel(state: HookState | undefined): { text: string; cssClass: string } {
     if (!state) { return { text: 'Unknown', cssClass: 'status-unknown' }; }
     switch (state.type) {
-        case 'permission_prompt': return { text: 'Pending Permission', cssClass: 'status-permission' };
-        case 'idle_prompt': return { text: 'Waiting on User', cssClass: 'status-idle' };
-        case 'error': return { text: 'Error', cssClass: 'status-error' };
-        case 'executing_tool': {
+        case StatusType.PERMISSION_PROMPT: return { text: 'Pending Permission', cssClass: 'status-permission' };
+        case StatusType.IDLE_PROMPT: return { text: 'Waiting on User', cssClass: 'status-idle' };
+        case StatusType.ERROR: return { text: 'Error', cssClass: 'status-error' };
+        case StatusType.EXECUTING_TOOL: {
             const label = state.tool_name ? `Running ${state.tool_name}` : 'Executing';
             return { text: label, cssClass: 'status-executing' };
         }
-        case 'processing': return { text: 'Processing', cssClass: 'status-processing' };
-        case 'stopped': return { text: 'Done', cssClass: 'status-done' };
-        case 'idle': return { text: 'Idle', cssClass: 'status-done' };
+        case StatusType.PROCESSING: return { text: 'Processing', cssClass: 'status-processing' };
+        case StatusType.STOPPED: return { text: 'Done', cssClass: 'status-done' };
+        case StatusType.IDLE: return { text: 'Idle', cssClass: 'status-done' };
         default: return { text: state.type, cssClass: 'status-other' };
     }
 }

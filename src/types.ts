@@ -2,16 +2,28 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as os from 'os';
 
+/** State written by state-tracker.py to ~/.claude/hooks/state/{CLAUDE_FILE}.json */
 export interface HookState {
+    /** Status type — see StatusType in constants.ts for known values */
     type: string;
+    /** Unix timestamp (seconds) when the hook fired */
     timestamp: number;
+    /** Human-readable status message */
     message: string;
+    /** Working directory of the Claude session */
     cwd?: string;
+    /** CLAUDE_FILE env var value (basename of .claude file) */
     tab?: string;
+    /** Tool name — present when type is 'executing_tool' or 'processing' (last tool) */
     tool_name?: string;
+    /** Short summary of tool input (max 80 chars) — present when type is 'executing_tool' */
     tool_input_summary?: string;
+    /** Which hook event wrote this entry (e.g., 'PreToolUse', 'Stop') */
     hook_event?: string;
+    /** Error details — present when type is 'error' (max 200 chars) */
     stop_reason?: string;
+    /** Session UUID — present when hook_event is 'SessionStart' */
+    session_id?: string;
 }
 
 export interface SubagentInfo {
