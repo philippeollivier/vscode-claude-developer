@@ -100,6 +100,16 @@ def main() -> None:
     os.makedirs(state_dir, exist_ok=True)
     state_file = os.path.join(state_dir, f'{claude_file}.json')
 
+    # Preserve session_id from previous state so it's always available
+    if 'session_id' not in state:
+        try:
+            with open(state_file) as f:
+                prev = json.load(f)
+            if 'session_id' in prev:
+                state['session_id'] = prev['session_id']
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pass
+
     with open(state_file, 'w') as f:
         json.dump(state, f)
 

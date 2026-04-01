@@ -300,12 +300,43 @@ export class SessionRegistry {
         }
     }
 
-    /** Refresh lastActive for all entries from disk. */
+    /** Refresh lastActive for all entries from disk (log file + state file). */
     async refreshLastActive(): Promise<void> {
         for (const entry of this._entries.values()) {
+            if (entry.task) { continue; }
+
+            // Check state file — updated on every hook event, even across session restarts
+            try {
+                const stateFile = path.join(STATE_DIR, `${entry.claudeFile}.json`);
+                const stateRaw = await fs.promises.readFile(stateFile, 'utf-8');
+                const state = safeJsonParse<{ session_id?: string; timestamp?: number }>(stateRaw);
+
+                // If state file has a different session_id, re-resolve the session
+                if (state?.session_id && state.session_id !== entry.sessionId) {
+                    const logPath = getSessionLogPath(entry.dir, state.session_id);
+                    try {
+                        const stat = await fs.promises.stat(logPath);
+                        entry.sessionId = state.session_id;
+                        entry.logPath = logPath;
+                        entry.lastActive = stat.mtime;
+                        await this.persist();
+                    } catch { /* new log file doesn't exist yet */ }
+                }
+
+                // Use state file mtime as a lower bound for lastActive
+                const stateStat = await fs.promises.stat(stateFile);
+                if (!entry.lastActive || stateStat.mtime > entry.lastActive) {
+                    entry.lastActive = stateStat.mtime;
+                }
+            } catch { /* no state file */ }
+
+            // Check log file mtime
             if (!entry.logPath) { continue; }
             try {
-                entry.lastActive = (await fs.promises.stat(entry.logPath)).mtime;
+                const logMtime = (await fs.promises.stat(entry.logPath)).mtime;
+                if (!entry.lastActive || logMtime > entry.lastActive) {
+                    entry.lastActive = logMtime;
+                }
             } catch {
                 /* expected: log file may have been removed */
             }
