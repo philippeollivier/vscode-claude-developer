@@ -39,7 +39,7 @@ function renderSessionCard(s: SessionInfo, summaries: Map<string, string>, subag
     if (runningAgents.length > 0) {
         const runningRows = runningAgents.map(a => {
             const escapedLogPath = a.logPath ? escapePathForJs(a.logPath) : '';
-            const clickable = a.logPath ? ` agent-clickable" onclick="event.stopPropagation(); toggleAgent(this, '${escapedLogPath}')` : '"';
+            const clickable = a.logPath ? ` agent-clickable" onclick="event.stopPropagation(); toggleAgent(this, '${escapedLogPath}')"` : '"';
             return `<div class="agent-row agent-running${clickable}><span class="agent-dot running"></span><span class="agent-desc">${escapeHtml(a.description)}</span><span class="agent-type">${escapeHtml(a.subagentType)}</span></div>`;
         }).join('');
         agentsHtml = `<div class="agents-section">

@@ -26,8 +26,7 @@ export function getDashboardCss(): string {
         .card-btn:hover { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); }
         .card-btn-menu { font-size: 16px; font-weight: 700; letter-spacing: 1px; }
         .card-btn-close:hover { color: #e5534b; }
-        .fork-child { margin-left: 20px; position: relative; }
-        .fork-child::before { content: '\u2442'; position: absolute; left: -16px; top: 14px; color: var(--vscode-descriptionForeground); font-size: 12px; }
+        .fork-child { margin-left: 20px; padding-left: 12px; border-left: 1px solid var(--vscode-panel-border); }
         .tail { font-size: 10px; font-family: var(--vscode-editor-font-family); line-height: 1.4; color: var(--vscode-descriptionForeground); max-height: 160px; overflow-y: auto; }
         .tail-line { white-space: pre-wrap; word-break: break-word; }
         .tail-line code { background: var(--vscode-textCodeBlock-background, rgba(255,255,255,0.06)); padding: 1px 4px; border-radius: 3px; font-size: 10px; }
